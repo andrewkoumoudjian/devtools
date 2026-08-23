@@ -1,0 +1,76 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "devtools-forge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "artifacts": [
+    { "binding": "ARTIFACTS", "namespace": "devtools-forge" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "devtools-forge",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "BACKUP_BUCKET", "bucket_name": "devtools-forge-ci-backups" }
+  ],
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile.workspace",
+      "instance_type": "basic",
+      "max_instances": 20
+    },
+    {
+      "class_name": "CiSandbox",
+      "image": "./Dockerfile.ci",
+      "instance_type": "standard-4",
+      "max_instances": 20
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "WORKSPACE_SANDBOX", "class_name": "Sandbox" },
+      { "name": "SANDBOX", "class_name": "CiSandbox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Sandbox"] }
+  ],
+  "exports": {
+    "CiSandbox": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "workflows": [
+    {
+      "name": "devtools-forge-ci",
+      "binding": "CI_WORKFLOW",
+      "class_name": "ForgeCI"
+    }
+  ],
+  "triggers": {
+    "events": [
+      {
+        "type": "cf.artifacts.repo.pushed",
+        "filter": { "namespace": "devtools-forge" },
+        "targets": [
+          { "type": "workflow", "workflow_name": "devtools-forge-ci" }
+        ]
+      }
+    ]
+  },
+  "vars": {
+    "ARTIFACTS_NAMESPACE": "devtools-forge",
+    "BACKUP_BUCKET_NAME": "devtools-forge-ci-backups",
+    "CLOUDFLARE_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_DEPLOY_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}
