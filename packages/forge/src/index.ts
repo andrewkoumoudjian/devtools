@@ -71,12 +71,13 @@ export default {
     }
 
     if (url.pathname === '/artifacts' || url.pathname.startsWith('/artifacts/')) {
+      const artifactsCache = await caches.open('forge-artifacts');
       const handled = await routeArtifactRequest(request, {
         apiPath: '/artifacts',
         accountId: env.CLOUDFLARE_ACCOUNT_ID,
         namespace: env.ARTIFACTS_NAMESPACE,
         apiToken: env.ARTIFACTS_API_TOKEN,
-        cache: createCacheApiAdapter({ cache: caches.default, baseUrl: url.origin }),
+        cache: createCacheApiAdapter({ cache: artifactsCache, baseUrl: url.origin }),
         waitUntil: (promise) => ctx.waitUntil(promise),
       });
       if (handled) return handled;
