@@ -5,6 +5,7 @@ import { artifactClient } from './artifacts';
 
 const MOUNT_SCRIPT = '/usr/local/bin/mount-artifact-fs-repo';
 const MOUNT_ROOT = '/workspace/mnt';
+type SandboxId = `${string}-${string}-${string}-${string}-${string}`;
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -16,7 +17,7 @@ function basicAuth(token: string): string {
 }
 
 function sandboxFor(env: ForgeEnv, id: string) {
-  return getSandbox(env.WORKSPACE_SANDBOX as never, id, {
+  return getSandbox(env.WORKSPACE_SANDBOX as never, id as SandboxId, {
     enableDefaultSession: false,
     normalizeId: true,
     sleepAfter: '30m',
