@@ -42,20 +42,5 @@ export function createForgeMcpServer(env: ForgeEnv) {
     async ({ name, input }) => text(await capabilityRegistry.execute({ env }, name, input)),
   );
 
-  server.registerResource(
-    'capabilities',
-    'forge://capabilities',
-    { description: 'Complete forge capability catalogue', mimeType: 'application/json' },
-    async () => ({
-      contents: [
-        {
-          uri: 'forge://capabilities',
-          mimeType: 'application/json',
-          text: JSON.stringify(capabilityRegistry.list(), null, 2),
-        },
-      ],
-    }),
-  );
-
   return server;
 }

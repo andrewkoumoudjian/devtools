@@ -28,7 +28,7 @@ export class ForgeCI extends CIWorkflow<CloudflareArtifacts, ForgeEnv> {
       }),
       bootstrap.runner({
         name: 'test',
-        command: "if [ -f package.json ]; then npm test --if-present; elif [ -x .forge/test.sh ]; then .forge/test.sh; fi",
+        command: "if [ -f package.json ]; then npm run test --if-present; elif [ -x .forge/test.sh ]; then .forge/test.sh; fi",
       }),
       bootstrap.runner({
         name: 'typecheck',

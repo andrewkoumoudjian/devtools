@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.26-bookworm AS artifact-fs-build
-RUN GOBIN=/out go install github.com/cloudflare/artifact-fs/cmd/artifact-fs@latest
+RUN GOBIN=/out go install github.com/cloudflare/artifact-fs/cmd/artifact-fs@2b87a48691ef4ae82d391b7bbe4976c06c7fadf7
 
 FROM docker.io/cloudflare/sandbox:0.12.5
 RUN apt-get update && apt-get install -y --no-install-recommends \

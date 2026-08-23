@@ -38,10 +38,8 @@
       { "name": "SANDBOX", "class_name": "CiSandbox" }
     ]
   },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Sandbox"] }
-  ],
   "exports": {
+    "Sandbox": { "type": "durable-object", "storage": "sqlite" },
     "CiSandbox": { "type": "durable-object", "storage": "sqlite" }
   },
   "workflows": [
