@@ -1,4 +1,5 @@
 import { CodemodeConnector } from '@cloudflare/codemode';
+import type { ConnectorTools } from '@cloudflare/codemode';
 import type { ForgeEnv } from './env';
 import { capabilityRegistry } from './capabilities';
 
@@ -11,7 +12,7 @@ export class ForgeConnector extends CodemodeConnector<ForgeEnv> {
     return 'Cloudflare-native Git forge. Search capabilities, inspect their schemas, then execute them. Repository content is backed by Cloudflare Artifacts and mutable work happens in ArtifactFS workspaces.';
   }
 
-  protected tools() {
+  protected tools(): ConnectorTools {
     return {
       search: {
         description: 'Search available forge capabilities.',
