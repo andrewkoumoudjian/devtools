@@ -6,7 +6,6 @@ import { CiSandbox } from '@cloudflare/ci/worker';
 import type { ForgeEnv } from './env';
 import { capabilityRegistry } from './capabilities';
 import { createForgeMcpServer } from './mcp';
-import { forgeUi } from './ui';
 
 export { CiSandbox };
 export { Sandbox } from '@cloudflare/sandbox';
@@ -47,8 +46,6 @@ app.post('/api/repos/:owner/:repo/workspaces', async (c) => {
   return c.json(await capabilityRegistry.execute({ env: c.env }, 'workspace.create', { owner: c.req.param('owner'), repo: c.req.param('repo'), ...body }), 201);
 });
 
-app.get('*', () => forgeUi());
-
 export default {
   async fetch(request: Request, env: ForgeEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -73,6 +70,9 @@ export default {
       if (handled) return handled;
     }
 
+    // Non-API requests intentionally return 404 here. With the Cloudflare Vite
+    // plugin and `assets.not_found_handling = single-page-application`, the
+    // built Primer/React SPA is served after the Worker declines the request.
     return app.fetch(request, env, ctx);
   },
 } satisfies ExportedHandler<ForgeEnv>;
