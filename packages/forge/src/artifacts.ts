@@ -2,7 +2,7 @@ import { createArtifact } from '@cloudflare/computer/artifacts';
 import type { ForgeEnv } from './env';
 
 export function artifactClient(env: ForgeEnv) {
-  return createArtifact(env.ARTIFACTS);
+  return createArtifact(env.ARTIFACTS, null);
 }
 
 export function credentialedRemote(remote: string, token: string): string {
