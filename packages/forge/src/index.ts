@@ -6,6 +6,7 @@ import { CiSandbox } from '@cloudflare/ci/worker';
 import type { ForgeEnv } from './env';
 import { capabilityRegistry } from './capabilities';
 import { createForgeMcpServer } from './mcp';
+import { getRepoRecord, listCiRuns } from './db';
 
 export { CiSandbox };
 export { Sandbox } from '@cloudflare/sandbox';
@@ -28,6 +29,17 @@ app.post('/api/execute', async (c) => {
   try {
     const body = await c.req.json<{ name?: string; input?: unknown }>();
     if (!body.name) return c.json({ error: 'name is required' }, 400);
+
+    // CI history is a read-only UI projection over forge metadata. Keep it on
+    // the same execute wire shape while the canonical registry grows a richer
+    // CI read surface (steps/logs/checks) in the next tranche.
+    if (body.name === 'ci.list') {
+      const input = body.input as { owner?: string; repo?: string } | undefined;
+      if (!input?.owner || !input.repo) return c.json({ error: 'owner and repo are required' }, 400);
+      const repo = await getRepoRecord(c.env, input.owner, input.repo);
+      return c.json({ result: await listCiRuns(c.env, repo) });
+    }
+
     const result = await capabilityRegistry.execute({ env: c.env }, body.name, body.input ?? {});
     return c.json({ result });
   } catch (error) {
