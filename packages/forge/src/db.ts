@@ -135,3 +135,12 @@ export async function recordCiRun(
     .run();
   return env.DB.prepare(`SELECT * FROM ci_runs WHERE id = ?`).bind(id).first();
 }
+
+export async function listCiRuns(env: ForgeEnv, repo: RepoRecord, limit = 50) {
+  const result = await env.DB.prepare(
+    `SELECT * FROM ci_runs WHERE repo_id = ? ORDER BY created_at DESC LIMIT ?`,
+  )
+    .bind(repo.id, limit)
+    .all();
+  return result.results;
+}
