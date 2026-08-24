@@ -18,7 +18,7 @@
     {
       "binding": "DB",
       "database_name": "devtools-forge",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "78bcc27f-9cbd-48ef-950a-bed0bedc7e83",
       "migrations_dir": "migrations"
     }
   ],
@@ -71,8 +71,8 @@
   "vars": {
     "ARTIFACTS_NAMESPACE": "devtools-forge",
     "BACKUP_BUCKET_NAME": "devtools-forge-ci-backups",
-    "CLOUDFLARE_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID",
-    "CLOUDFLARE_DEPLOY_ACCOUNT_ID": "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+    "CLOUDFLARE_ACCOUNT_ID": "07bf69122f7acfe30a6612a1d4d8ab5a",
+    "CLOUDFLARE_DEPLOY_ACCOUNT_ID": "07bf69122f7acfe30a6612a1d4d8ab5a"
   },
   "observability": {
     "enabled": true,

@@ -1,1 +1,1 @@
-FROM docker.io/cloudflare/sandbox:0.12.1@sha256:ea9b35e61c800eddbc4450fad333e5dd26033a06f7d36624388b0711bef9f8c5
+FROM docker.io/cloudflare/sandbox:0.12.5@sha256:315b14485d6982774521f3e2f605fdf39ba6de6942d65a022048a54967ca0062

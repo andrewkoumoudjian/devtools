@@ -7,7 +7,30 @@ import type { RepoRecord, Commit, GitRefs, FileSearch, CodeSearch, LastCommit } 
 import { execute } from './api';
 import { Markdown } from './Markdown';
 
-const artifactsClient = createArtifactsClient({ apiPath: '/artifacts' });
+// Instrumented fetch: artifacts-viewer collapses every thrown fetch into
+// "The request could not be sent." Log + surface the real cause (offline,
+// CORS, extension block, abort) and retry once on transient failures.
+const instrumentedFetch: typeof fetch = async (input, init) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  try {
+    return await fetch(input, init);
+  } catch (firstError) {
+    const aborted = init?.signal?.aborted === true;
+    if (!aborted) {
+      console.error(`[forge] ${init?.method ?? 'GET'} ${url} failed`, firstError);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      try {
+        return await fetch(input, init);
+      } catch (retryError) {
+        console.error(`[forge] retry also failed for ${url}`, retryError);
+        throw firstError;
+      }
+    }
+    throw firstError;
+  }
+};
+
+const artifactsClient = createArtifactsClient({ apiPath: '/artifacts', fetch: instrumentedFetch });
 
 type CloneInfo = { plaintext: string; expiresAt?: string };
 type Readme = { path: string; content: string } | null;

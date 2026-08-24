@@ -150,9 +150,12 @@ export async function syncWorkspaceContext(
   const json = JSON.stringify(context, null, 2);
   const markdown = repoContextMarkdown(context);
   const command = [
-    'mkdir -p .git/forge',
-    `printf %s ${shellQuote(base64Utf8(json))} | base64 -d > .git/forge/context.json`,
-    `printf %s ${shellQuote(base64Utf8(markdown))} | base64 -d > .git/forge/AGENT_CONTEXT.md`,
+    // In ArtifactFS views `.git` can be a gitfile pointing at the real gitdir,
+    // so always resolve it instead of assuming `./.git` is a directory.
+    'GIT_DIR_ABS=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null || echo "$PWD/.git")',
+    'mkdir -p "$GIT_DIR_ABS/forge"',
+    `printf %s ${shellQuote(base64Utf8(json))} | base64 -d > "$GIT_DIR_ABS/forge/context.json"`,
+    `printf %s ${shellQuote(base64Utf8(markdown))} | base64 -d > "$GIT_DIR_ABS/forge/AGENT_CONTEXT.md"`,
   ].join(' && ');
   const result = await sandbox.exec(command, { cwd, timeout: 20_000 });
   if (!result.success) throw new Error(`could not synchronize Forge context: ${result.stderr.slice(0, 500)}`);
