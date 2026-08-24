@@ -88,7 +88,7 @@ export function createForgeMcpServer(env: ForgeEnv) {
   server.registerTool(
     'forge_workspace_exec',
     {
-      description: 'Run a normal command inside the ArtifactFS-backed POSIX workspace. Use this for git, rg, tests, compilers, package managers, OpenCode/Codex-style tools, and other commands that genuinely need a working tree.',
+      description: 'Run a normal command inside a write-capable ArtifactFS-backed POSIX workspace. Use for git, rg, tests, compilers, package managers and commands that genuinely need a working tree. Read-only sessions fail closed for arbitrary shell execution.',
       inputSchema: {
         owner: z.string(),
         repo: z.string(),
@@ -170,6 +170,42 @@ export function createForgeMcpServer(env: ForgeEnv) {
       }
       if (!input.ref) throw new Error('ref is required for push');
       return run(env, 'workspace.push', { ...base, ref: input.ref });
+    },
+  );
+
+  server.registerTool(
+    'forge_workspace_process',
+    {
+      description: 'Manage long-running commands with Cloudflare Sandbox native process management inside the ArtifactFS workspace. Supports start/list/get/logs/kill without inventing a forge-side process scheduler.',
+      inputSchema: {
+        owner: z.string(),
+        repo: z.string(),
+        workspaceId: z.string(),
+        action: z.enum(['start', 'list', 'get', 'logs', 'kill']),
+        command: z.string().optional(),
+        processId: z.string().optional(),
+        timeoutMs: z.number().int().positive().max(86_400_000).optional(),
+        autoCleanup: z.boolean().optional(),
+        signal: z.string().optional(),
+      },
+    },
+    async (input) => {
+      const base = { owner: input.owner, repo: input.repo, workspaceId: input.workspaceId };
+      if (input.action === 'start') {
+        if (!input.command) throw new Error('command is required for start');
+        return run(env, 'workspace.process.start', {
+          ...base,
+          command: input.command,
+          processId: input.processId,
+          timeoutMs: input.timeoutMs,
+          autoCleanup: input.autoCleanup ?? false,
+        });
+      }
+      if (input.action === 'list') return run(env, 'workspace.process.list', base);
+      if (!input.processId) throw new Error('processId is required for get/logs/kill');
+      if (input.action === 'get') return run(env, 'workspace.process.get', { ...base, processId: input.processId });
+      if (input.action === 'logs') return run(env, 'workspace.process.logs', { ...base, processId: input.processId });
+      return run(env, 'workspace.process.kill', { ...base, processId: input.processId, signal: input.signal ?? 'SIGTERM' });
     },
   );
 
