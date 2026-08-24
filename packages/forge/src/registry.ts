@@ -4,6 +4,7 @@ import { featureCapabilities } from './feature-capabilities';
 import { artifactNativeCapabilities } from './artifact-native-capabilities';
 import { policyCapabilities } from './policy-capabilities';
 import { workspaceCapabilities } from './workspace-capabilities';
+import { workspaceProcessCapabilities } from './workspace-process-capabilities';
 import { buildRepoContext, type ContextTarget } from './context';
 import { getRepoRecord } from './db';
 
@@ -11,13 +12,14 @@ export type ForgeCapabilityContext = { env: ForgeEnv };
 
 // Ordering is intentional: later capability families override older/core names.
 // Artifact-native reads replace checkout-backed fallbacks, policy capabilities
-// add authorization primitives, and workspace capabilities replace the original
-// thin workspace surface with the native Sandbox + ArtifactFS API.
+// add authorization primitives, and workspace families use Sandbox + ArtifactFS
+// directly for real POSIX/file/process operations.
 const featureList = [
   ...featureCapabilities,
   ...artifactNativeCapabilities,
   ...policyCapabilities,
   ...workspaceCapabilities,
+  ...workspaceProcessCapabilities,
 ];
 const features = new Map(featureList.map((capability) => [capability.name, capability]));
 const aliases: Record<string, string> = {
@@ -121,8 +123,8 @@ export const forgeRegistry = {
     if (name.startsWith('context.')) return { result, context: result };
 
     // Workspace operations refresh the exact mounted workspace context before
-    // touching files/commands. Prefer that context over rebuilding one from a
-    // possibly different default ref.
+    // touching files/commands/processes. Prefer that context over rebuilding one
+    // from a possibly different default ref.
     const workspaceResultContext = contextFromResult(result);
     if (name.startsWith('workspace.') && workspaceResultContext !== undefined) {
       return { result, context: workspaceResultContext };
