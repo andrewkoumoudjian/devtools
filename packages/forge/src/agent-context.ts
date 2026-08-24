@@ -3,6 +3,7 @@ import type { RepoRecord } from './db';
 import { artifactRefs, artifactText } from './artifacts';
 import { buildRepoContext, type ContextTarget } from './context';
 import { getRepoSettings } from './product';
+import { recallRepoMemory } from './repo-memory';
 
 export type AgentContextMode = 'none' | 'minimal' | 'full';
 export type KnownAgentContext = { id: string; version: string };
@@ -15,6 +16,7 @@ export type AgentContextCoordinates = {
   ref?: string;
   target?: ContextTarget;
   path?: string;
+  memoryQuery?: string;
   agentName?: string;
   accessMode?: 'read-only' | 'write-capable';
 };
@@ -73,14 +75,25 @@ async function buildMinimalContext(env: ForgeEnv, repo: RepoRecord, coordinates:
   const settings = await getRepoSettings(env, repo);
   const ref = coordinates.ref ?? repo.default_branch;
   const accessMode = coordinates.accessMode ?? (settings.agent_write_enabled ? 'write-capable' : 'read-only');
-  const [refs, instructions] = await Promise.all([
+  const memoryQuery = coordinates.memoryQuery?.trim() ?? '';
+  const [refs, instructions, sharedMemory] = await Promise.all([
     artifactRefs(env, repo.artifact_name).catch(() => ({ head: repo.default_branch, headHash: null, branches: [], tags: [], other: [] })),
     effectiveInstructions(env, repo, ref, coordinates.path),
+    memoryQuery
+      ? recallRepoMemory(env, repo, memoryQuery, 5, coordinates.path).catch(() => null)
+      : Promise.resolve(null),
   ]);
   const headSha = refs.branches.find((branch) => branch.name === ref)?.hash
     ?? (ref === refs.head ? refs.headHash : null)
     ?? (/^[0-9a-f]{40}$/i.test(ref) ? ref : null);
   const effectiveInstructionsHash = await sha256(JSON.stringify(instructions));
+  const memory = sharedMemory?.memories?.length
+    ? {
+        revision: sharedMemory.revision,
+        query: sharedMemory.query,
+        memories: sharedMemory.memories,
+      }
+    : undefined;
 
   return {
     schemaVersion: 2,
@@ -95,6 +108,7 @@ async function buildMinimalContext(env: ForgeEnv, repo: RepoRecord, coordinates:
     },
     instructions,
     effectiveInstructionsHash,
+    ...(memory ? { sharedMemory: memory } : {}),
     retrieval: {
       file: 'fs.read',
       fileSearch: 'fs.search',
@@ -105,6 +119,8 @@ async function buildMinimalContext(env: ForgeEnv, repo: RepoRecord, coordinates:
       pullDiff: 'pull.diff',
       pullChecks: 'pull.checks',
       ciLogs: 'ci.step.log',
+      memory: 'memory.recall',
+      remember: 'memory.remember',
     },
   };
 }
@@ -169,10 +185,11 @@ export async function agentContextEnvelope(
       },
       instructions: minimal.instructions,
       effectiveInstructionsHash: minimal.effectiveInstructionsHash,
+      ...('sharedMemory' in minimal ? { sharedMemory: minimal.sharedMemory } : {}),
     };
   }
 
-  const identity = `${repo.id}:${coordinates.ref ?? repo.default_branch}:${targetKey(coordinates.target)}:${coordinates.path ?? ''}:${mode}`;
+  const identity = `${repo.id}:${coordinates.ref ?? repo.default_branch}:${targetKey(coordinates.target)}:${coordinates.path ?? ''}:${coordinates.memoryQuery ?? ''}:${mode}`;
   const id = `ctx_${(await sha256(identity)).slice(0, 20)}`;
   const stable = stableContext(value);
   const version = (await sha256(JSON.stringify(stable))).slice(0, 24);
