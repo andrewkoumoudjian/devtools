@@ -159,16 +159,20 @@ export async function execWorkspace(
 export async function repoGitCommand(
   env: ForgeEnv,
   repo: RepoRecord,
-  ref: string,
   command: string,
   timeoutMs = 120_000,
 ) {
   const id = crypto.randomUUID();
-  const { sandbox, cwd } = await mountWorkspace(env, repo, ref, id, 'read');
+  const { sandbox, cwd } = await mountWorkspace(env, repo, repo.default_branch, id, 'read');
   try {
+    const fetchRefs = await sandbox.exec(
+      "git fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'",
+      { cwd, timeout: 120_000 },
+    );
+    if (!fetchRefs.success) throw new Error(fetchRefs.stderr || `git fetch failed with ${fetchRefs.exitCode}`);
     const result = await sandbox.exec(command, {
       cwd,
-      env: { FORGE_REPOSITORY: `${repo.owner}/${repo.name}`, FORGE_REF: ref },
+      env: { FORGE_REPOSITORY: `${repo.owner}/${repo.name}` },
       timeout: Math.min(Math.max(timeoutMs, 1_000), 600_000),
     });
     if (!result.success) throw new Error(result.stderr || `git command failed with ${result.exitCode}`);
