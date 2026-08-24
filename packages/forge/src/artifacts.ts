@@ -16,6 +16,24 @@ export type GitRefs = {
   other: GitRef[];
 };
 
+export type ArtifactsGitIdentity = { name: string; email: string };
+export type ArtifactsCommit = {
+  hash: string;
+  treeHash: string;
+  message: string;
+  author: ArtifactsGitIdentity;
+  committer: ArtifactsGitIdentity;
+  parents: string[];
+  authoredAt: number;
+  committedAt: number;
+};
+export type ArtifactsTreeEntry = {
+  name: string;
+  mode: string;
+  hash: string;
+  type: 'tree' | 'blob' | 'symlink' | 'gitlink' | 'exec';
+};
+
 export function artifactClient(env: ForgeEnv) {
   return createArtifact(env.ARTIFACTS, null);
 }
@@ -100,6 +118,23 @@ export async function artifactFile(
   return artifactFetch(env, repo, ['file'], { ref, path }, 'application/octet-stream');
 }
 
+export async function artifactBlob(
+  env: ForgeEnv,
+  repo: string,
+  hash: string,
+): Promise<Response> {
+  return artifactFetch(env, repo, ['blob', hash], undefined, 'application/octet-stream');
+}
+
+async function boundedText(response: Response, label: string, maxBytes: number): Promise<string> {
+  const declared = Number(response.headers.get('content-length') ?? 0);
+  if (declared > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  if (bytes.subarray(0, Math.min(bytes.length, 8192)).includes(0)) throw new Error(`${label} is binary`);
+  return new TextDecoder().decode(bytes);
+}
+
 export async function artifactText(
   env: ForgeEnv,
   repo: string,
@@ -107,12 +142,16 @@ export async function artifactText(
   path: string,
   maxBytes = 1_000_000,
 ): Promise<string> {
-  const response = await artifactFile(env, repo, ref, path);
-  const declared = Number(response.headers.get('content-length') ?? 0);
-  if (declared > maxBytes) throw new Error(`${path} exceeds ${maxBytes} bytes`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > maxBytes) throw new Error(`${path} exceeds ${maxBytes} bytes`);
-  return new TextDecoder().decode(bytes);
+  return boundedText(await artifactFile(env, repo, ref, path), path, maxBytes);
+}
+
+export async function artifactBlobText(
+  env: ForgeEnv,
+  repo: string,
+  hash: string,
+  maxBytes = 1_000_000,
+): Promise<string> {
+  return boundedText(await artifactBlob(env, repo, hash), hash, maxBytes);
 }
 
 export async function artifactRaw(
@@ -124,7 +163,7 @@ export async function artifactRaw(
   return artifactFetch(env, repo, ['raw', ref, ...path.split('/')], undefined, '*/*');
 }
 
-export async function artifactLog<T>(
+export async function artifactLog<T = ArtifactsCommit[]>(
   env: ForgeEnv,
   repo: string,
   ref?: string,
@@ -134,11 +173,11 @@ export async function artifactLog<T>(
   return artifactJson<T>(env, repo, ['log'], { ref, limit, offset });
 }
 
-export async function artifactTree<T>(env: ForgeEnv, repo: string, hash: string): Promise<T> {
+export async function artifactTree<T = ArtifactsTreeEntry[]>(env: ForgeEnv, repo: string, hash: string): Promise<T> {
   return artifactJson<T>(env, repo, ['tree', hash]);
 }
 
-export async function artifactCommit<T>(env: ForgeEnv, repo: string, hash: string): Promise<T> {
+export async function artifactCommit<T = ArtifactsCommit>(env: ForgeEnv, repo: string, hash: string): Promise<T> {
   return artifactJson<T>(env, repo, ['commit', hash]);
 }
 
