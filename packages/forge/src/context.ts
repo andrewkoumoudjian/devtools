@@ -76,8 +76,10 @@ function parseCodeowners(content: string): CodeownersRule[] {
 }
 
 async function loadInstructions(env: ForgeEnv, repo: RepoRecord, ref: string) {
-  const results = await Promise.all(INSTRUCTION_FILES.map(async (path) => ({ path, content: await optionalText(env, repo, ref, path) })));
-  return results.filter((item): item is { path: string; content: string } => item.content !== null);
+  const results = await Promise.all(
+    INSTRUCTION_FILES.map(async (path) => ({ path, content: await optionalText(env, repo, ref, path) })),
+  );
+  return results.flatMap((item) => item.content === null ? [] : [{ path: item.path, content: item.content }]);
 }
 
 async function loadCodeowners(env: ForgeEnv, repo: RepoRecord, ref: string) {
