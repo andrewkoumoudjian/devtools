@@ -13,6 +13,7 @@ import {
 } from './product';
 
 const EXIT_MARKER = '__FORGE_STEP_EXIT_CODE__=';
+const PHASE_MARKER = '__FORGE_BOOTSTRAP_PHASE__=';
 
 type RunnerStart = (options: { name: string; command: string; cloudflareCredentials?: boolean | { accountId: string } }) => Promise<CiRunnerResult>;
 
@@ -38,8 +39,23 @@ function extractExitCode(stdout: string) {
   return Number.isFinite(parsed) ? parsed : 1;
 }
 
+function extractBootstrapPhase(stdout: string) {
+  const matches = Array.from(stdout.matchAll(new RegExp(`${PHASE_MARKER}([^\\r\\n]+)`, 'g')));
+  return matches.at(-1)?.[1]?.trim() || null;
+}
+
 function stripExitMarker(stdout: string) {
   return stdout.replace(new RegExp(`\\n?${EXIT_MARKER}\\d+\\r?\\n?$`), '');
+}
+
+function diagnostic(name: string, message: string, phase: string | null, exitCode?: number) {
+  return JSON.stringify({
+    kind: 'forge.ci.runner_failure',
+    runner: name,
+    phase,
+    exitCode: exitCode ?? null,
+    message,
+  }, null, 2);
 }
 
 async function persistLogs(env: ForgeEnv, runId: string, stepId: string, stdout: string, stderr: string) {
@@ -64,24 +80,57 @@ async function trackedRunner(
   const step = await startCiStep(env, runId, name);
   try {
     const result = await start({ name, command: wrappedCommand(command), ...options });
-    const [rawStdout, stderr] = await Promise.all([logText(result.logs.stdout), logText(result.logs.stderr)]);
+    const [rawStdout, rawStderr] = await Promise.all([logText(result.logs.stdout), logText(result.logs.stderr)]);
     const exitCode = extractExitCode(rawStdout);
     const stdout = stripExitMarker(rawStdout);
+    const phase = extractBootstrapPhase(stdout);
+    const message = `${name} failed with exit code ${exitCode}${phase ? ` during ${phase}` : ''}`;
+    const stderr = exitCode === 0
+      ? rawStderr
+      : [rawStderr.trim(), diagnostic(name, message, phase, exitCode)].filter(Boolean).join('\n\n');
     const keys = await persistLogs(env, runId, step.id, stdout, stderr);
     await finishCiStep(env, step.id, {
       status: exitCode === 0 ? 'success' : 'failure',
       exitCode,
       ...keys,
     });
-    if (exitCode !== 0) throw new Error(`${name} failed with exit code ${exitCode}`);
+    if (exitCode !== 0) throw new Error(message);
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const phase = name.startsWith('bootstrap') ? 'workspace_start' : 'runner_start';
     const key = `forge-ci/logs/${runId}/${step.id}/stderr.log`;
-    await env.BACKUP_BUCKET.put(key, message, { httpMetadata: { contentType: 'text/plain; charset=utf-8' } }).catch(() => undefined);
-    await finishCiStep(env, step.id, { status: 'failure', stderrKey: key }).catch(() => undefined);
+    const existing = await env.BACKUP_BUCKET.get(key).then((object) => object?.text()).catch(() => undefined);
+    if (!existing) {
+      await env.BACKUP_BUCKET.put(key, diagnostic(name, message, phase), {
+        httpMetadata: { contentType: 'text/plain; charset=utf-8' },
+      }).catch(() => undefined);
+      await finishCiStep(env, step.id, { status: 'failure', stderrKey: key }).catch(() => undefined);
+    }
     throw error;
   }
+}
+
+function bootstrapCommand() {
+  return [
+    'set -e',
+    `printf '${PHASE_MARKER}artifactfs_mount\\n'`,
+    'test -d .git',
+    'git rev-parse --git-dir >/dev/null',
+    `printf '${PHASE_MARKER}checkout_projection\\n'`,
+    'git rev-parse HEAD',
+    'git status --porcelain=v1 -uno >/dev/null',
+    `printf '${PHASE_MARKER}runtime\\n'`,
+    '(command -v node || command -v bun || command -v deno || command -v python3) >/dev/null',
+    `printf '${PHASE_MARKER}workflow_parse\\n'`,
+    "if [ -f package.json ]; then node -e \"JSON.parse(require('fs').readFileSync('package.json','utf8'))\"; fi",
+    `printf '${PHASE_MARKER}dependencies\\n'`,
+    'if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile;',
+    'elif [ -f package-lock.json ]; then npm ci;',
+    'elif [ -f yarn.lock ]; then corepack enable && yarn install --immutable;',
+    'elif [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile;',
+    'fi',
+  ].join(' ');
 }
 
 export class ForgeCI extends CIWorkflow<CloudflareArtifacts, ForgeEnv> {
@@ -112,15 +161,8 @@ export class ForgeCI extends CIWorkflow<CloudflareArtifacts, ForgeEnv> {
       const bootstrap = await trackedRunner(
         this.env,
         run.id,
-        'bootstrap',
-        [
-          'set -e',
-          'if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile;',
-          'elif [ -f package-lock.json ]; then npm ci;',
-          'elif [ -f yarn.lock ]; then corepack enable && yarn install --immutable;',
-          'elif [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile;',
-          'fi',
-        ].join(' '),
+        'bootstrap.workspace',
+        bootstrapCommand(),
         (options) => ci.runner(options),
       );
 
