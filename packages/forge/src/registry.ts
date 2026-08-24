@@ -2,6 +2,7 @@ import type { ForgeEnv } from './env';
 import { capabilityRegistry as coreRegistry } from './capabilities';
 import { featureCapabilities } from './feature-capabilities';
 import { artifactNativeCapabilities } from './artifact-native-capabilities';
+import { memoryCapabilities } from './memory-capabilities';
 import { policyCapabilities } from './policy-capabilities';
 import { workspaceCapabilities } from './workspace-capabilities';
 import { workspaceProcessCapabilities } from './workspace-process-capabilities';
@@ -15,6 +16,7 @@ export type ForgeBatchItem = { name: string; input?: unknown };
 const featureList = [
   ...featureCapabilities,
   ...artifactNativeCapabilities,
+  ...memoryCapabilities,
   ...policyCapabilities,
   ...workspaceCapabilities,
   ...workspaceProcessCapabilities,
@@ -66,6 +68,22 @@ function repoCoordinates(name: string, rawInput: unknown): RepoCoordinates | nul
     path: typeof input.path === 'string' ? input.path : undefined,
     accessMode: input.accessMode === 'read-only' || input.accessMode === 'write-capable' ? input.accessMode : undefined,
   };
+}
+
+function memoryQueryFrom(name: string, rawInput: unknown) {
+  if (name.startsWith('memory.')) return undefined;
+  if (typeof rawInput !== 'object' || rawInput === null) return name;
+  const input = rawInput as Record<string, unknown>;
+  const values = [
+    name,
+    input.path,
+    input.query,
+    input.command,
+    input.message,
+    input.ref,
+    input.branch,
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return values.join(' ').slice(0, 1_200);
 }
 
 function coordinatesFromContext(base: RepoCoordinates, context: unknown): RepoCoordinates {
@@ -182,6 +200,7 @@ export const forgeRegistry = {
         ref: coordinates.ref,
         target: coordinates.target,
         path: coordinates.path,
+        memoryQuery: memoryQueryFrom(name, rawInput),
         agentName: 'remote-agent',
         accessMode: coordinates.accessMode,
       }, contextRequest);
