@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { FeatureCapability } from './feature-capabilities';
 import { getRepoRecord } from './db';
-import { diffRevisions, lastCommitForPath, searchCode, searchFilePaths } from './git-data';
+import { diffRevisions, lastCommitForPath, searchFilePaths } from './git-data';
+import { searchCodeIndexed } from './search-index';
 
 function capability<T extends z.ZodType>(
   name: string,
@@ -50,7 +51,7 @@ export const artifactNativeCapabilities: FeatureCapability[] = [
   ),
   capability(
     'code.search',
-    'Literal code search by walking Cloudflare Artifacts Git trees and reading content-addressed blobs directly. No checkout, embedding index, or LLM call.',
+    'Literal code search over immutable Cloudflare Artifacts blobs with a persistent blob-hash trigram/text index in R2. Unchanged blobs are reused across commits and worker restarts; direct Artifacts scanning remains the cache-miss fallback.',
     repo.extend({
       ref: z.string().default('main'),
       query: z.string().min(1),
@@ -74,7 +75,7 @@ export const artifactNativeCapabilities: FeatureCapability[] = [
     async ({ env }, input: never) => {
       const value = input as { owner: string; repo: string; ref: string; query: string; limit: number; caseSensitive: boolean; maxFiles: number };
       const record = await getRepoRecord(env, value.owner, value.repo);
-      return searchCode(env, record, value.ref, value.query, {
+      return searchCodeIndexed(env, record, value.ref, value.query, {
         limit: value.limit,
         caseSensitive: value.caseSensitive,
         maxFiles: value.maxFiles,
