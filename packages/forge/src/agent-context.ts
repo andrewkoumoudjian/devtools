@@ -87,10 +87,13 @@ async function buildMinimalContext(env: ForgeEnv, repo: RepoRecord, coordinates:
     ?? (ref === refs.head ? refs.headHash : null)
     ?? (/^[0-9a-f]{40}$/i.test(ref) ? ref : null);
   const effectiveInstructionsHash = await sha256(JSON.stringify(instructions));
-  const memory = sharedMemory?.memories?.length
+  const memory = sharedMemory && (sharedMemory.answer || sharedMemory.memories.length)
     ? {
-        revision: sharedMemory.revision,
+        source: sharedMemory.source,
+        profile: sharedMemory.profile,
         query: sharedMemory.query,
+        path: sharedMemory.path,
+        answer: sharedMemory.answer,
         memories: sharedMemory.memories,
       }
     : undefined;
@@ -121,6 +124,8 @@ async function buildMinimalContext(env: ForgeEnv, repo: RepoRecord, coordinates:
       ciLogs: 'ci.step.log',
       memory: 'memory.recall',
       remember: 'memory.remember',
+      ingestMemory: 'memory.ingest',
+      memorySummary: 'memory.summary',
     },
   };
 }
