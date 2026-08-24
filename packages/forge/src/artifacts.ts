@@ -35,7 +35,7 @@ export type ArtifactsTreeEntry = {
 };
 
 export function artifactClient(env: ForgeEnv) {
-  return createArtifact(env.ARTIFACTS, null);
+  return createArtifact(env.ARTIFACTS);
 }
 
 export function credentialedRemote(remote: string, token: string): string {
