@@ -1,4 +1,3 @@
-import { Agent } from 'agents';
 import type { ForgeEnv } from './env';
 import type { RepoRecord } from './db';
 
@@ -18,250 +17,163 @@ export type RepoMemoryWrite = {
   evidence?: RepoMemoryEvidence[];
   agent?: string;
   confidence?: number;
+  sessionId?: string;
 };
 
-export type RepoMemoryRecord = {
-  key: string;
-  kind: RepoMemoryKind;
-  title: string;
-  content: string;
-  paths: string[];
-  evidence: RepoMemoryEvidence[];
-  agent: string;
-  confidence: number;
-  createdAt: number;
-  updatedAt: number;
-  rank?: number;
-};
+const encoder = new TextEncoder();
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function safeJson<T>(value: string, fallback: T): T {
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return fallback;
-  }
+function truncateUtf8(value: string, maxBytes: number) {
+  if (encoder.encode(value).byteLength <= maxBytes) return value;
+  let end = value.length;
+  while (end > 0 && encoder.encode(value.slice(0, end)).byteLength > maxBytes) end = Math.floor(end * 0.9);
+  while (end < value.length && encoder.encode(value.slice(0, end + 1)).byteLength <= maxBytes) end += 1;
+  return value.slice(0, end);
 }
 
-function ftsQuery(query: string) {
-  const tokens = query
-    .trim()
-    .split(/\s+/)
-    .map((token) => token.replace(/[^\p{L}\p{N}_./:-]+/gu, ''))
-    .filter((token) => token.length >= 2)
-    .slice(0, 24);
-  return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(' OR ');
+function profileName(repo: RepoRecord) {
+  // Agent Memory profiles are isolated stores. The forge repository UUID is
+  // stable across branches/workspaces and comfortably below the 100-char limit.
+  return repo.id;
 }
 
-async function stableKey(input: RepoMemoryWrite) {
-  if (input.key?.trim()) return input.key.trim();
-  const source = `${input.kind}\n${input.title.trim()}\n${(input.paths ?? []).slice().sort().join('\n')}`;
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
-  return `mem_${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('').slice(0, 24)}`;
+function normalizedSessionId(value?: string) {
+  const trimmed = value?.trim();
+  return trimmed ? truncateUtf8(trimmed, 64) : null;
 }
 
-function rowToMemory(row: {
-  key: string;
-  kind: string;
-  title: string;
-  content: string;
-  paths_json: string;
-  evidence_json: string;
-  agent: string;
-  confidence: number;
-  created_at: number;
-  updated_at: number;
-  rank?: number;
-}): RepoMemoryRecord {
+function memoryContent(repo: RepoRecord, input: RepoMemoryWrite) {
+  const paths = Array.from(new Set((input.paths ?? []).map((path) => path.trim()).filter(Boolean))).slice(0, 32);
+  const evidence = (input.evidence ?? []).filter((item) => item.value.trim()).slice(0, 32);
+  const confidence = clamp(input.confidence ?? 0.8, 0, 1);
+  const lines = [
+    `Repository: ${repo.owner}/${repo.name}`,
+    `Forge memory kind: ${input.kind}`,
+    input.key?.trim() ? `Memory key: ${input.key.trim()}` : null,
+    `Title: ${input.title.trim()}`,
+    input.agent?.trim() ? `Produced by agent: ${input.agent.trim()}` : null,
+    `Confidence: ${confidence}`,
+    paths.length ? `Relevant paths: ${paths.join(', ')}` : null,
+    evidence.length ? 'Evidence:' : null,
+    ...evidence.map((item) => `- ${item.kind}: ${item.value.trim()}`),
+    '',
+    input.content.trim(),
+  ].filter((line): line is string => line !== null);
+  return lines.join('\n');
+}
+
+async function memoryProfile(env: ForgeEnv, repo: RepoRecord) {
+  return env.REPO_MEMORY.getProfile(profileName(repo));
+}
+
+function normalizeMemory(memory: AgentMemoryMemory) {
   return {
-    key: row.key,
-    kind: row.kind as RepoMemoryKind,
-    title: row.title,
-    content: row.content,
-    paths: safeJson<string[]>(row.paths_json, []),
-    evidence: safeJson<RepoMemoryEvidence[]>(row.evidence_json, []),
-    agent: row.agent,
-    confidence: row.confidence,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    rank: row.rank,
+    id: memory.id,
+    type: memory.type,
+    summary: memory.summary,
+    content: memory.content,
+    sessionId: memory.sessionId,
+    createdAt: new Date(memory.createdAt).toISOString(),
+    updatedAt: new Date(memory.updatedAt).toISOString(),
   };
 }
 
-export class RepoMemoryAgent extends Agent<ForgeEnv> {
-  onStart() {
-    this.sql`
-      CREATE TABLE IF NOT EXISTS forge_repo_memory (
-        key TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        title TEXT NOT NULL,
-        content TEXT NOT NULL,
-        paths_json TEXT NOT NULL,
-        evidence_json TEXT NOT NULL,
-        agent TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    `;
-    this.sql`
-      CREATE VIRTUAL TABLE IF NOT EXISTS forge_repo_memory_fts USING fts5(
-        key UNINDEXED,
-        title,
-        content,
-        paths,
-        tokenize='porter unicode61'
-      )
-    `;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS forge_repo_memory_revision (
-        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-        revision INTEGER NOT NULL
-      )
-    `;
-    this.sql`INSERT OR IGNORE INTO forge_repo_memory_revision (singleton, revision) VALUES (1, 0)`;
-  }
-
-  private currentRevision() {
-    return this.sql<{ revision: number }>`SELECT revision FROM forge_repo_memory_revision WHERE singleton = 1`[0]?.revision ?? 0;
-  }
-
-  async remember(input: RepoMemoryWrite) {
-    const title = input.title.trim();
-    const content = input.content.trim();
-    if (!title) throw new Error('memory title is required');
-    if (!content) throw new Error('memory content is required');
-    const key = await stableKey(input);
-    const now = Date.now();
-    const paths = Array.from(new Set((input.paths ?? []).map((path) => path.trim()).filter(Boolean))).slice(0, 32);
-    const evidence = (input.evidence ?? []).filter((item) => item.value.trim()).slice(0, 32);
-    const confidence = clamp(input.confidence ?? 0.8, 0, 1);
-    const agent = input.agent?.trim() || 'remote-agent';
-    const existing = this.sql<{ created_at: number }>`SELECT created_at FROM forge_repo_memory WHERE key = ${key}`[0];
-    const createdAt = existing?.created_at ?? now;
-
-    this.sql`
-      INSERT INTO forge_repo_memory (
-        key, kind, title, content, paths_json, evidence_json, agent, confidence, created_at, updated_at
-      ) VALUES (
-        ${key}, ${input.kind}, ${title}, ${content}, ${JSON.stringify(paths)}, ${JSON.stringify(evidence)},
-        ${agent}, ${confidence}, ${createdAt}, ${now}
-      )
-      ON CONFLICT(key) DO UPDATE SET
-        kind = excluded.kind,
-        title = excluded.title,
-        content = excluded.content,
-        paths_json = excluded.paths_json,
-        evidence_json = excluded.evidence_json,
-        agent = excluded.agent,
-        confidence = excluded.confidence,
-        updated_at = excluded.updated_at
-    `;
-    this.sql`DELETE FROM forge_repo_memory_fts WHERE key = ${key}`;
-    this.sql`
-      INSERT INTO forge_repo_memory_fts (key, title, content, paths)
-      VALUES (${key}, ${title}, ${content}, ${paths.join(' ')})
-    `;
-    this.sql`UPDATE forge_repo_memory_revision SET revision = revision + 1 WHERE singleton = 1`;
-
-    return {
-      revision: this.currentRevision(),
-      memory: rowToMemory({
-        key,
-        kind: input.kind,
-        title,
-        content,
-        paths_json: JSON.stringify(paths),
-        evidence_json: JSON.stringify(evidence),
-        agent,
-        confidence,
-        created_at: createdAt,
-        updated_at: now,
-      }),
-    };
-  }
-
-  async recall(query: string, limit = 8, path?: string) {
-    const capped = clamp(limit, 1, 20);
-    const normalized = query.trim();
-    let rows: Array<{
-      key: string;
-      kind: string;
-      title: string;
-      content: string;
-      paths_json: string;
-      evidence_json: string;
-      agent: string;
-      confidence: number;
-      created_at: number;
-      updated_at: number;
-      rank?: number;
-    }>;
-
-    const match = ftsQuery(normalized);
-    if (match) {
-      rows = this.sql`
-        SELECT m.*, bm25(forge_repo_memory_fts) AS rank
-        FROM forge_repo_memory_fts
-        JOIN forge_repo_memory m ON m.key = forge_repo_memory_fts.key
-        WHERE forge_repo_memory_fts MATCH ${match}
-        ORDER BY rank ASC, m.confidence DESC, m.updated_at DESC
-        LIMIT ${Math.min(capped * 3, 60)}
-      `;
-    } else {
-      rows = this.sql`
-        SELECT m.*
-        FROM forge_repo_memory m
-        ORDER BY m.confidence DESC, m.updated_at DESC
-        LIMIT ${Math.min(capped * 3, 60)}
-      `;
-    }
-
-    const memories = rows
-      .map(rowToMemory)
-      .filter((memory) => !path || memory.paths.length === 0 || memory.paths.some((candidate) => path === candidate || path.startsWith(`${candidate}/`) || candidate.startsWith(`${path}/`)))
-      .slice(0, capped);
-
-    return { revision: this.currentRevision(), query: normalized, path: path ?? null, memories };
-  }
-
-  async recent(limit = 8) {
-    const capped = clamp(limit, 1, 20);
-    const rows = this.sql<{
-      key: string;
-      kind: string;
-      title: string;
-      content: string;
-      paths_json: string;
-      evidence_json: string;
-      agent: string;
-      confidence: number;
-      created_at: number;
-      updated_at: number;
-    }>`
-      SELECT * FROM forge_repo_memory
-      ORDER BY confidence DESC, updated_at DESC
-      LIMIT ${capped}
-    `;
-    return { revision: this.currentRevision(), memories: rows.map(rowToMemory) };
-  }
-}
-
-function memoryStub(env: ForgeEnv, repo: RepoRecord) {
-  return env.REPO_MEMORY.getByName(repo.id) as DurableObjectStub<RepoMemoryAgent>;
+function recallQuery(repo: RepoRecord, query: string, path?: string) {
+  const value = [
+    `Repository ${repo.owner}/${repo.name}.`,
+    path ? `Relevant path: ${path}.` : '',
+    query.trim() || 'Recall the most relevant durable lessons, failures, decisions, constraints, and conventions for the current repository work.',
+  ].filter(Boolean).join(' ');
+  return truncateUtf8(value, 1_024);
 }
 
 export async function rememberRepoMemory(env: ForgeEnv, repo: RepoRecord, input: RepoMemoryWrite) {
-  return memoryStub(env, repo).remember(input);
+  if (!input.title.trim()) throw new Error('memory title is required');
+  if (!input.content.trim()) throw new Error('memory content is required');
+  const profile = await memoryProfile(env, repo);
+  const memory = await profile.remember({
+    content: memoryContent(repo, input),
+    sessionId: normalizedSessionId(input.sessionId),
+  });
+  return {
+    source: 'cloudflare-agent-memory',
+    profile: profileName(repo),
+    memory: normalizeMemory(memory),
+  };
+}
+
+export async function ingestRepoMemory(
+  env: ForgeEnv,
+  repo: RepoRecord,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; timestamp?: string }>,
+  sessionId?: string,
+) {
+  const profile = await memoryProfile(env, repo);
+  await profile.ingest(
+    messages.map((message) => ({
+      role: message.role,
+      content: truncateUtf8(message.content, 32_768),
+      ...(message.timestamp ? { timestamp: new Date(message.timestamp) } : {}),
+    })),
+    { sessionId: normalizedSessionId(sessionId) },
+  );
+  return {
+    source: 'cloudflare-agent-memory',
+    profile: profileName(repo),
+    ingested: messages.length,
+    sessionId: normalizedSessionId(sessionId),
+  };
 }
 
 export async function recallRepoMemory(env: ForgeEnv, repo: RepoRecord, query: string, limit = 8, path?: string) {
-  return memoryStub(env, repo).recall(query, limit, path);
+  const capped = clamp(limit, 1, 20);
+  const profile = await memoryProfile(env, repo);
+  const nativeQuery = recallQuery(repo, query, path);
+  const result = await profile.recall(nativeQuery, {
+    thinkingLevel: 'medium',
+    responseLength: 'short',
+    referenceDate: new Date(),
+  });
+  const candidates = result.candidates.slice(0, capped);
+  const memories = (await Promise.all(
+    candidates.map((candidate) => profile.get(candidate.id).catch(() => null)),
+  )).flatMap((memory) => memory ? [normalizeMemory(memory)] : []);
+  return {
+    source: 'cloudflare-agent-memory',
+    profile: profileName(repo),
+    query: nativeQuery,
+    path: path ?? null,
+    count: result.count,
+    answer: result.answer,
+    candidates,
+    memories,
+  };
 }
 
 export async function recentRepoMemory(env: ForgeEnv, repo: RepoRecord, limit = 8) {
-  return memoryStub(env, repo).recent(limit);
+  const capped = clamp(limit, 1, 20);
+  const profile = await memoryProfile(env, repo);
+  const page = await profile.list({ limit: capped });
+  const memories = (await Promise.all(
+    page.memories.map((memory) => profile.get(memory.id).catch(() => null)),
+  )).flatMap((memory) => memory ? [normalizeMemory(memory)] : []);
+  return {
+    source: 'cloudflare-agent-memory',
+    profile: profileName(repo),
+    memories,
+    cursor: page.cursor ?? null,
+  };
+}
+
+export async function summarizeRepoMemory(env: ForgeEnv, repo: RepoRecord, sessionId?: string) {
+  const profile = await memoryProfile(env, repo);
+  const result = await profile.getSummary({ sessionId: normalizedSessionId(sessionId) });
+  return {
+    source: 'cloudflare-agent-memory',
+    profile: profileName(repo),
+    summary: result.summary,
+  };
 }
