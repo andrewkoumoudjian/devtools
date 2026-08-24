@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import type { FeatureCapability } from './feature-capabilities';
 import { getRepoRecord } from './db';
-import { recallRepoMemory, recentRepoMemory, rememberRepoMemory } from './repo-memory';
+import {
+  ingestRepoMemory,
+  recallRepoMemory,
+  recentRepoMemory,
+  rememberRepoMemory,
+  summarizeRepoMemory,
+} from './repo-memory';
 
 function capability<T extends z.ZodType>(
   name: string,
@@ -26,11 +32,16 @@ const evidence = z.object({
   kind: z.enum(['commit', 'pull', 'issue', 'ci', 'path', 'url']),
   value: z.string().min(1),
 });
+const message = z.object({
+  role: z.enum(['system', 'user', 'assistant']),
+  content: z.string().min(1),
+  timestamp: z.string().datetime().optional(),
+});
 
 export const memoryCapabilities: FeatureCapability[] = [
   capability(
     'memory.recall',
-    'Recall durable repo-scoped lessons, decisions, failures, constraints, and conventions produced by other agents. Search is lexical/FTS-backed inside one Cloudflare Agent Durable Object per repository.',
+    'Recall shared repository knowledge from Cloudflare Agent Memory. Every forge repository maps to one isolated Agent Memory profile, so all agents working on that repository retrieve the same durable facts, events, instructions, and lessons.',
     false,
     repo.extend({
       query: z.string().default(''),
@@ -42,8 +53,8 @@ export const memoryCapabilities: FeatureCapability[] = [
       properties: {
         owner: { type: 'string' },
         repo: { type: 'string' },
-        query: { type: 'string' },
-        path: { type: 'string' },
+        query: { type: 'string', description: 'Natural-language memory query.' },
+        path: { type: 'string', description: 'Optional repository path used as retrieval context.' },
         limit: { type: 'integer', minimum: 1, maximum: 20, default: 8 },
       },
       required: ['owner', 'repo'],
@@ -58,7 +69,7 @@ export const memoryCapabilities: FeatureCapability[] = [
   ),
   capability(
     'memory.remember',
-    'Persist a non-obvious repo-specific lesson so later agents do not repeat the same mistake. Store conclusions, failed approaches, architectural decisions, constraints, and conventions with evidence; do not use as transient scratchpad.',
+    'Explicitly store a durable repository lesson in Cloudflare Agent Memory. Use for known conclusions, failed approaches, architectural decisions, constraints, and conventions; Agent Memory classifies and summarizes the content and handles supersession of evolving facts/instructions.',
     true,
     repo.extend({
       key: z.string().min(1).optional(),
@@ -69,13 +80,14 @@ export const memoryCapabilities: FeatureCapability[] = [
       evidence: z.array(evidence).max(32).optional(),
       agent: z.string().optional(),
       confidence: z.number().min(0).max(1).optional(),
+      sessionId: z.string().min(1).optional(),
     }),
     {
       type: 'object',
       properties: {
         owner: { type: 'string' },
         repo: { type: 'string' },
-        key: { type: 'string', description: 'Stable key when updating/correcting an existing memory.' },
+        key: { type: 'string', description: 'Optional stable semantic key included in the stored memory to make corrections/supersession explicit.' },
         kind: { type: 'string', enum: ['lesson', 'decision', 'failure', 'constraint', 'convention'] },
         title: { type: 'string' },
         content: { type: 'string' },
@@ -94,6 +106,7 @@ export const memoryCapabilities: FeatureCapability[] = [
         },
         agent: { type: 'string' },
         confidence: { type: 'number', minimum: 0, maximum: 1 },
+        sessionId: { type: 'string', description: 'Optional coding-session/workspace identifier. Agent Memory limits it to 64 characters.' },
       },
       required: ['owner', 'repo', 'kind', 'title', 'content'],
     },
@@ -109,18 +122,72 @@ export const memoryCapabilities: FeatureCapability[] = [
         evidence?: Array<{ kind: 'commit' | 'pull' | 'issue' | 'ci' | 'path' | 'url'; value: string }>;
         agent?: string;
         confidence?: number;
+        sessionId?: string;
       };
       const record = await getRepoRecord(env, value.owner, value.repo);
-      return rememberRepoMemory(env, record, {
-        key: value.key,
-        kind: value.kind,
-        title: value.title,
-        content: value.content,
-        paths: value.paths,
-        evidence: value.evidence,
-        agent: value.agent,
-        confidence: value.confidence,
-      });
+      return rememberRepoMemory(env, record, value);
+    },
+  ),
+  capability(
+    'memory.ingest',
+    'Send a completed or checkpointed agent conversation to Cloudflare Agent Memory for automatic extraction of durable facts, events, instructions, and tasks. Prefer natural checkpoints instead of ingesting every turn.',
+    true,
+    repo.extend({
+      messages: z.array(message).min(1).max(500),
+      sessionId: z.string().min(1).optional(),
+    }),
+    {
+      type: 'object',
+      properties: {
+        owner: { type: 'string' },
+        repo: { type: 'string' },
+        messages: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 500,
+          items: {
+            type: 'object',
+            properties: {
+              role: { type: 'string', enum: ['system', 'user', 'assistant'] },
+              content: { type: 'string' },
+              timestamp: { type: 'string', format: 'date-time' },
+            },
+            required: ['role', 'content'],
+          },
+        },
+        sessionId: { type: 'string' },
+      },
+      required: ['owner', 'repo', 'messages'],
+    },
+    async ({ env }, input: never) => {
+      const value = input as {
+        owner: string;
+        repo: string;
+        messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; timestamp?: string }>;
+        sessionId?: string;
+      };
+      const record = await getRepoRecord(env, value.owner, value.repo);
+      return ingestRepoMemory(env, record, value.messages, value.sessionId);
+    },
+  ),
+  capability(
+    'memory.summary',
+    'Return Cloudflare Agent Memory’s structured Markdown summary of what the shared repository profile currently remembers.',
+    false,
+    repo.extend({ sessionId: z.string().min(1).optional() }),
+    {
+      type: 'object',
+      properties: {
+        owner: { type: 'string' },
+        repo: { type: 'string' },
+        sessionId: { type: 'string' },
+      },
+      required: ['owner', 'repo'],
+    },
+    async ({ env }, input: never) => {
+      const value = input as { owner: string; repo: string; sessionId?: string };
+      const record = await getRepoRecord(env, value.owner, value.repo);
+      return summarizeRepoMemory(env, record, value.sessionId);
     },
   ),
 ];
