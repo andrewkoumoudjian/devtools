@@ -39,12 +39,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACE_SANDBOX", "class_name": "Sandbox" },
-      { "name": "SANDBOX", "class_name": "CiSandbox" }
+      { "name": "SANDBOX", "class_name": "CiSandbox" },
+      { "name": "REPO_MEMORY", "class_name": "RepoMemoryAgent" }
     ]
   },
   "exports": {
     "Sandbox": { "type": "durable-object", "storage": "sqlite" },
-    "CiSandbox": { "type": "durable-object", "storage": "sqlite" }
+    "CiSandbox": { "type": "durable-object", "storage": "sqlite" },
+    "RepoMemoryAgent": { "type": "durable-object", "storage": "sqlite" }
   },
   "workflows": [
     {
