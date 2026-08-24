@@ -57,7 +57,7 @@ export async function startWorkspaceProcess(
     cwd,
     env: agentEnv(repo, cwd, session, context),
     processId: options.processId,
-    timeoutMs: options.timeoutMs,
+    timeout: options.timeoutMs,
     autoCleanup: options.autoCleanup ?? false,
   });
   return { process: processView(process), context };
