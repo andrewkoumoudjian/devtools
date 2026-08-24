@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+FROM golang:1.26-bookworm AS artifact-fs-build
+RUN GOBIN=/out go install github.com/cloudflare/artifact-fs/cmd/artifact-fs@2b87a48691ef4ae82d391b7bbe4976c06c7fadf7
+
+FROM docker.io/cloudflare/sandbox:0.12.5
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates coreutils fuse3 git openssh-client util-linux \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=artifact-fs-build /out/artifact-fs /usr/local/bin/artifact-fs
+COPY --chmod=0755 scripts/mount-artifact-fs-repo.sh /usr/local/bin/mount-artifact-fs-repo
+ENV ARTIFACT_FS_ROOT=/tmp/artifact-fs
+ENV MOUNT_ROOT=/workspace/mnt

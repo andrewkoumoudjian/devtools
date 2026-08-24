@@ -1,0 +1,44 @@
+{
+  "name": "@devtools/forge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "cf-typegen": "wrangler types --include-runtime=false --env-interface=CloudflareBindings"
+  },
+  "dependencies": {
+    "@cloudflare/ci": "0.1.0",
+    "@cloudflare/codemode": "0.5.1",
+    "@cloudflare/computer": "0.2.1",
+    "@cloudflare/sandbox": "0.12.5",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@primer/octicons-react": "19.28.1",
+    "@primer/react": "38.36.0",
+    "agents": "0.21.0",
+    "artifacts-viewer": "0.0.5",
+    "hono": "^4.9.8",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.53.1",
+    "@cloudflare/workers-types": "5.20260812.1",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.16",
+    "wrangler": "4.125.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "workerd"]
+  },
+  "packageManager": "pnpm@10.15.0"
+}

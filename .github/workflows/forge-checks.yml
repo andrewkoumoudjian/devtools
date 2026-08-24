@@ -1,0 +1,36 @@
+name: Forge checks
+
+on:
+  pull_request:
+    paths:
+      - 'packages/forge/**'
+      - '.github/workflows/forge-checks.yml'
+  push:
+    branches:
+      - feat/cloudflare-forge
+    paths:
+      - 'packages/forge/**'
+      - '.github/workflows/forge-checks.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/forge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: packages/forge/package.json
+      - name: Install
+        run: pnpm install --no-frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
