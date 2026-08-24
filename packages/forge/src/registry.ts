@@ -3,12 +3,22 @@ import { capabilityRegistry as coreRegistry } from './capabilities';
 import { featureCapabilities } from './feature-capabilities';
 import { artifactNativeCapabilities } from './artifact-native-capabilities';
 import { policyCapabilities } from './policy-capabilities';
+import { workspaceCapabilities } from './workspace-capabilities';
 import { buildRepoContext, type ContextTarget } from './context';
 import { getRepoRecord } from './db';
 
 export type ForgeCapabilityContext = { env: ForgeEnv };
 
-const featureList = [...featureCapabilities, ...artifactNativeCapabilities, ...policyCapabilities];
+// Ordering is intentional: later capability families override older/core names.
+// Artifact-native reads replace checkout-backed fallbacks, policy capabilities
+// add authorization primitives, and workspace capabilities replace the original
+// thin workspace surface with the native Sandbox + ArtifactFS API.
+const featureList = [
+  ...featureCapabilities,
+  ...artifactNativeCapabilities,
+  ...policyCapabilities,
+  ...workspaceCapabilities,
+];
 const features = new Map(featureList.map((capability) => [capability.name, capability]));
 const aliases: Record<string, string> = {
   'issue.create': 'issue.create.enriched',
@@ -30,11 +40,19 @@ function repoCoordinates(name: string, rawInput: unknown): { owner: string; repo
   else if (typeof input.issueNumber === 'number') target = { kind: 'issue', number: input.issueNumber };
   else if (typeof input.number === 'number' && name.startsWith('pull.')) target = { kind: 'pull', number: input.number };
   else if (typeof input.number === 'number' && name.startsWith('issue.')) target = { kind: 'issue', number: input.number };
+  else if (
+    (input.targetKind === 'issue' || input.targetKind === 'pull') &&
+    typeof input.targetNumber === 'number'
+  ) target = { kind: input.targetKind, number: input.targetNumber };
 
   return {
     owner: input.owner,
     repo: input.repo,
-    ref: typeof input.ref === 'string' ? input.ref : undefined,
+    ref: typeof input.ref === 'string'
+      ? input.ref
+      : typeof input.branch === 'string'
+        ? input.branch
+        : undefined,
     target,
   };
 }
@@ -53,6 +71,11 @@ function allSummaries() {
     .filter((capability) => !hiddenFeatures.has(capability.name) && !coreNames.has(capability.name))
     .map((capability) => summary(capability));
   return [...core, ...extra];
+}
+
+function contextFromResult(result: unknown) {
+  if (typeof result !== 'object' || result === null || !('context' in result)) return undefined;
+  return (result as { context?: unknown }).context;
 }
 
 export const forgeRegistry = {
@@ -96,6 +119,14 @@ export const forgeRegistry = {
   async executeForAgent(ctx: ForgeCapabilityContext, name: string, rawInput: unknown) {
     const result = await this.execute(ctx, name, rawInput);
     if (name.startsWith('context.')) return { result, context: result };
+
+    // Workspace operations refresh the exact mounted workspace context before
+    // touching files/commands. Prefer that context over rebuilding one from a
+    // possibly different default ref.
+    const workspaceResultContext = contextFromResult(result);
+    if (name.startsWith('workspace.') && workspaceResultContext !== undefined) {
+      return { result, context: workspaceResultContext };
+    }
 
     const coordinates = repoCoordinates(name, rawInput);
     if (!coordinates) return { result };
