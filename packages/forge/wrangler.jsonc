@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "devtools-forge",
   "main": "src/index.ts",
-  "compatibility_date": "2026-08-22",
+  "compatibility_date": "2026-08-24",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
@@ -10,6 +10,9 @@
   },
   "artifacts": [
     { "binding": "ARTIFACTS", "namespace": "devtools-forge" }
+  ],
+  "agent_memory": [
+    { "binding": "REPO_MEMORY", "namespace": "devtools-forge" }
   ],
   "d1_databases": [
     {
@@ -39,14 +42,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACE_SANDBOX", "class_name": "Sandbox" },
-      { "name": "SANDBOX", "class_name": "CiSandbox" },
-      { "name": "REPO_MEMORY", "class_name": "RepoMemoryAgent" }
+      { "name": "SANDBOX", "class_name": "CiSandbox" }
     ]
   },
   "exports": {
     "Sandbox": { "type": "durable-object", "storage": "sqlite" },
     "CiSandbox": { "type": "durable-object", "storage": "sqlite" },
-    "RepoMemoryAgent": { "type": "durable-object", "storage": "sqlite" }
+    "RepoMemoryAgent": { "type": "durable-object", "state": "deleted" }
   },
   "workflows": [
     {
