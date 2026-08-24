@@ -9,6 +9,7 @@ import { createForgeMcpServer } from './mcp';
 
 export { CiSandbox };
 export { Sandbox } from '@cloudflare/sandbox';
+export { RepoMemoryAgent } from './repo-memory';
 export { ForgeCI } from './ci';
 export { ForgeConnector } from './codemode';
 

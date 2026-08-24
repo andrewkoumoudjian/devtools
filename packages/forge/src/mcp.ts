@@ -2,27 +2,36 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ForgeEnv } from './env';
 import { forgeRegistry } from './registry';
+import type { AgentContextRequest } from './agent-context';
 
-function text(value: unknown) {
+function structured(value: unknown, message = 'Forge returned structured content.') {
+  const structuredContent = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : { result: value };
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
+    content: [{ type: 'text' as const, text: message }],
+    structuredContent,
   };
 }
 
-async function run(env: ForgeEnv, name: string, input: Record<string, unknown>) {
-  return text(await forgeRegistry.executeForAgent({ env }, name, input));
+function contextRequest(input: { contextMode?: 'none' | 'minimal' | 'full'; knownContext?: { id: string; version: string } }): AgentContextRequest {
+  return { mode: input.contextMode, known: input.knownContext };
+}
+
+async function run(env: ForgeEnv, name: string, input: Record<string, unknown>, request: AgentContextRequest = {}) {
+  return structured(await forgeRegistry.executeForAgent({ env }, name, input, request));
 }
 
 export function createForgeMcpServer(env: ForgeEnv) {
-  const server = new McpServer({ name: 'devtools-forge', version: '0.3.0' });
+  const server = new McpServer({ name: 'devtools-forge', version: '0.4.0' });
 
   server.registerTool(
     'forge_search',
     {
-      description: 'Search the forge capability graph. Repo-scoped executions automatically return the same deterministic RepoContext used by every other agent.',
-      inputSchema: { query: z.string().default('') },
+      description: 'Search the forge capability graph. Results include exact input schemas by default so execute calls do not require a separate describe round trip.',
+      inputSchema: { query: z.string().default(''), includeSchemas: z.boolean().default(true) },
     },
-    async ({ query }) => text(forgeRegistry.search(query)),
+    async ({ query, includeSchemas }) => structured(forgeRegistry.search(query, includeSchemas), 'Forge capability search results.'),
   );
 
   server.registerTool(
@@ -31,28 +40,52 @@ export function createForgeMcpServer(env: ForgeEnv) {
       description: 'Get the exact input schema and mutation status for one forge capability.',
       inputSchema: { name: z.string() },
     },
-    async ({ name }) => text(forgeRegistry.describe(name)),
+    async ({ name }) => structured(forgeRegistry.describe(name), 'Forge capability schema.'),
   );
 
   server.registerTool(
     'forge_execute',
     {
-      description: 'Execute one named forge capability. When owner/repo is present, the response also carries the current non-LLM RepoContext: authority, ref/head, repo instructions, CODEOWNERS, active work, target thread, CI and retrieval primitives.',
+      description: 'Execute one named forge capability. Repo context defaults to compact/path-aware minimal mode; pass the returned context id/version on the next call to collapse unchanged context to a tiny marker, or request full/none explicitly.',
       inputSchema: {
         name: z.string(),
         input: z.record(z.string(), z.unknown()).default({}),
+        contextMode: z.enum(['none', 'minimal', 'full']).default('minimal'),
+        knownContext: z.object({ id: z.string(), version: z.string() }).optional(),
       },
     },
-    async ({ name, input }) => text(await forgeRegistry.executeForAgent({ env }, name, input)),
+    async ({ name, input, contextMode, knownContext }) => structured(await forgeRegistry.executeForAgent(
+      { env },
+      name,
+      input,
+      contextRequest({ contextMode, knownContext }),
+    )),
   );
 
-  // Direct workspace tools are intentionally projected in addition to the
-  // generic capability executor. Remote coding agents should not have to build
-  // their own shell protocol just to interact with the ArtifactFS working tree.
+  server.registerTool(
+    'forge_batch',
+    {
+      description: 'Execute multiple forge capabilities in one round trip. Consecutive read-only capabilities run concurrently; mutations remain ordered. Batch context defaults to none to avoid repeated metadata.',
+      inputSchema: {
+        items: z.array(z.object({
+          name: z.string(),
+          input: z.record(z.string(), z.unknown()).default({}),
+        })).min(1).max(50),
+        contextMode: z.enum(['none', 'minimal', 'full']).default('none'),
+        knownContext: z.object({ id: z.string(), version: z.string() }).optional(),
+      },
+    },
+    async ({ items, contextMode, knownContext }) => structured(await forgeRegistry.executeBatchForAgent(
+      { env },
+      items,
+      contextRequest({ contextMode, knownContext }),
+    ), 'Forge batch results.'),
+  );
+
   server.registerTool(
     'forge_workspace_open',
     {
-      description: 'Open a mutable or read-only agent workspace. The repository is mounted lazily through ArtifactFS from Cloudflare Artifacts and the response includes the shared RepoContext.',
+      description: 'Open a mutable or read-only agent workspace. The repository is mounted lazily through ArtifactFS from Cloudflare Artifacts and the response includes compact shared RepoContext metadata.',
       inputSchema: {
         owner: z.string(),
         repo: z.string(),
