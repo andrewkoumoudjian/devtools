@@ -41,7 +41,7 @@ function base64Utf8(value: string): string {
   return btoa(binary);
 }
 
-function sandboxFor(env: ForgeEnv, id: string) {
+export function workspaceSandbox(env: ForgeEnv, id: string) {
   return getSandbox(env.WORKSPACE_SANDBOX as never, id as SandboxId, {
     enableDefaultSession: false,
     normalizeId: true,
@@ -50,7 +50,7 @@ function sandboxFor(env: ForgeEnv, id: string) {
   });
 }
 
-function workspaceRoot(repo: RepoRecord) {
+export function workspaceRoot(repo: RepoRecord) {
   return `${MOUNT_ROOT}/${repo.artifact_name}`;
 }
 
@@ -77,7 +77,7 @@ async function freshAuth(env: ForgeEnv, repo: RepoRecord, scope: 'read' | 'write
 }
 
 async function mountWorkspace(env: ForgeEnv, repo: RepoRecord, branch: string, workspaceId: string, scope: 'read' | 'write') {
-  const sandbox = sandboxFor(env, workspaceId);
+  const sandbox = workspaceSandbox(env, workspaceId);
   const auth = await freshAuth(env, repo, scope);
   const result = await sandbox.exec(MOUNT_SCRIPT, {
     cwd: '/workspace',
@@ -98,7 +98,7 @@ async function mountWorkspace(env: ForgeEnv, repo: RepoRecord, branch: string, w
 }
 
 async function currentBranch(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
-  const result = await sandboxFor(env, workspaceId).exec('git branch --show-current', {
+  const result = await workspaceSandbox(env, workspaceId).exec('git branch --show-current', {
     cwd: workspaceRoot(repo),
     timeout: 10_000,
   });
@@ -139,7 +139,7 @@ export async function syncWorkspaceContext(
   ref: string,
   options: { agentName?: string; target?: ContextTarget; accessMode?: 'read-only' | 'write-capable' } = {},
 ) {
-  const sandbox = sandboxFor(env, workspaceId);
+  const sandbox = workspaceSandbox(env, workspaceId);
   const cwd = workspaceRoot(repo);
   const context = await buildRepoContext(env, repo, {
     ref,
@@ -159,7 +159,7 @@ export async function syncWorkspaceContext(
   return context;
 }
 
-async function prepareWorkspaceOperation(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
+export async function prepareWorkspaceOperation(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
   const session = await getWorkspaceSession(env, workspaceId, repo);
   const ref = await currentBranch(env, workspaceId, repo);
   if (ref !== session.ref) {
@@ -174,10 +174,10 @@ async function prepareWorkspaceOperation(env: ForgeEnv, workspaceId: string, rep
     target: targetFromSession(session),
     accessMode: session.access_mode,
   });
-  return { session: { ...session, ref }, context, sandbox: sandboxFor(env, workspaceId), cwd: workspaceRoot(repo) };
+  return { session: { ...session, ref }, context, sandbox: workspaceSandbox(env, workspaceId), cwd: workspaceRoot(repo) };
 }
 
-async function assertWorkspaceWritable(env: ForgeEnv, repo: RepoRecord, session: WorkspaceSession | AgentSessionContext) {
+export async function assertWorkspaceWritable(env: ForgeEnv, repo: RepoRecord, session: WorkspaceSession | AgentSessionContext) {
   if (session.access_mode === 'read-only') throw new Error('workspace is read-only');
   const settings = await getRepoSettings(env, repo);
   if (!settings.agent_write_enabled) throw new Error('repository agent writes are disabled');
@@ -217,14 +217,16 @@ export async function createWorkspace(
   };
 }
 
-export async function execWorkspace(
+async function runWorkspaceCommand(
   env: ForgeEnv,
   workspaceId: string,
   repo: RepoRecord,
   command: string,
-  timeoutMs = 120_000,
+  timeoutMs: number,
+  requireWrite: boolean,
 ) {
   const { session, context, sandbox, cwd } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  if (requireWrite) await assertWorkspaceWritable(env, repo, session);
   const result = await sandbox.exec(command, {
     cwd,
     env: {
@@ -248,6 +250,19 @@ export async function execWorkspace(
   };
 }
 
+export async function execWorkspace(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  command: string,
+  timeoutMs = 120_000,
+) {
+  // Arbitrary shell execution can mutate the working tree, package caches, or
+  // repository metadata. Fail closed for read-only agent sessions; read-only
+  // agents still have Artifacts-native reads and native workspace file reads.
+  return runWorkspaceCommand(env, workspaceId, repo, command, timeoutMs, true);
+}
+
 export async function readWorkspaceFile(
   env: ForgeEnv,
   workspaceId: string,
@@ -260,7 +275,7 @@ export async function readWorkspaceFile(
   const file = encoding === 'base64'
     ? await sandbox.readFile(absolutePath, { encoding: 'base64' })
     : await sandbox.readFile(absolutePath);
-  return { path, ...file, context };
+  return { requestedPath: path, file, context };
 }
 
 export async function writeWorkspaceFile(
@@ -279,10 +294,10 @@ export async function writeWorkspaceFile(
     const parent = absolutePath.slice(0, absolutePath.lastIndexOf('/'));
     if (parent && parent !== workspaceRoot(repo)) await sandbox.mkdir(parent, { recursive: true });
   }
-  const result = options.encoding === 'base64'
+  const file = options.encoding === 'base64'
     ? await sandbox.writeFile(absolutePath, content, { encoding: 'base64' })
     : await sandbox.writeFile(absolutePath, content);
-  return { path, ...result, context };
+  return { requestedPath: path, file, context };
 }
 
 export async function listWorkspaceFiles(
@@ -293,8 +308,8 @@ export async function listWorkspaceFiles(
   options: { recursive?: boolean; includeHidden?: boolean } = {},
 ) {
   const { sandbox, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
-  const result = await sandbox.listFiles(workspacePath(repo, path), options);
-  return { path, ...result, context };
+  const listing = await sandbox.listFiles(workspacePath(repo, path), options);
+  return { requestedPath: path, listing, context };
 }
 
 export async function workspaceExists(
@@ -304,7 +319,8 @@ export async function workspaceExists(
   path: string,
 ) {
   const { sandbox, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
-  return { path, ...(await sandbox.exists(workspacePath(repo, path))), context };
+  const result = await sandbox.exists(workspacePath(repo, path));
+  return { requestedPath: path, result, context };
 }
 
 export async function mkdirWorkspace(
@@ -317,7 +333,8 @@ export async function mkdirWorkspace(
   assertWorkingTreePath(path);
   const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
   await assertWorkspaceWritable(env, repo, session);
-  return { path, ...(await sandbox.mkdir(workspacePath(repo, path), { recursive })), context };
+  const directory = await sandbox.mkdir(workspacePath(repo, path), { recursive });
+  return { requestedPath: path, directory, context };
 }
 
 export async function moveWorkspaceFile(
@@ -331,7 +348,8 @@ export async function moveWorkspaceFile(
   assertWorkingTreePath(to);
   const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
   await assertWorkspaceWritable(env, repo, session);
-  return { from, to, ...(await sandbox.moveFile(workspacePath(repo, from), workspacePath(repo, to))), context };
+  const result = await sandbox.moveFile(workspacePath(repo, from), workspacePath(repo, to));
+  return { from, to, result, context };
 }
 
 export async function deleteWorkspaceFile(
@@ -343,7 +361,8 @@ export async function deleteWorkspaceFile(
   assertWorkingTreePath(path);
   const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
   await assertWorkspaceWritable(env, repo, session);
-  return { path, ...(await sandbox.deleteFile(workspacePath(repo, path))), context };
+  const result = await sandbox.deleteFile(workspacePath(repo, path));
+  return { requestedPath: path, result, context };
 }
 
 export async function workspaceContext(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
@@ -385,7 +404,14 @@ export async function repoGitCommand(
 }
 
 export async function diffWorkspace(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
-  return execWorkspace(env, workspaceId, repo, 'git diff --no-ext-diff --binary && git status --short');
+  return runWorkspaceCommand(
+    env,
+    workspaceId,
+    repo,
+    'git diff --no-ext-diff --binary && git status --short',
+    120_000,
+    false,
+  );
 }
 
 export async function commitWorkspace(
@@ -394,8 +420,8 @@ export async function commitWorkspace(
   repo: RepoRecord,
   input: { message: string; authorName?: string; authorEmail?: string },
 ) {
-  const session = await agentSession(env, workspaceId, repo);
-  if (session?.access_mode === 'read-only') throw new Error('workspace is read-only; commit is not permitted');
+  const session = await getWorkspaceSession(env, workspaceId, repo);
+  await assertWorkspaceWritable(env, repo, session);
   const name = input.authorName ?? 'Forge Agent';
   const email = input.authorEmail ?? 'forge-agent@localhost';
   const command = [
@@ -405,7 +431,7 @@ export async function commitWorkspace(
     `git commit -m ${shellQuote(input.message)}`,
     'git rev-parse HEAD',
   ].join(' && ');
-  return execWorkspace(env, workspaceId, repo, command);
+  return runWorkspaceCommand(env, workspaceId, repo, command, 120_000, true);
 }
 
 export async function pushWorkspace(
@@ -414,12 +440,10 @@ export async function pushWorkspace(
   repo: RepoRecord,
   ref: string,
 ) {
-  const session = await agentSession(env, workspaceId, repo);
-  if (session?.access_mode === 'read-only') throw new Error('workspace is read-only; push is not permitted');
-  const settings = await getRepoSettings(env, repo);
-  if (!settings.agent_write_enabled) throw new Error('repository agent writes are disabled');
+  const session = await getWorkspaceSession(env, workspaceId, repo);
+  await assertWorkspaceWritable(env, repo, session);
 
-  const sandbox = sandboxFor(env, workspaceId);
+  const sandbox = workspaceSandbox(env, workspaceId);
   const auth = await freshAuth(env, repo, 'write');
   const cwd = workspaceRoot(repo);
   const configure = await sandbox.exec(
@@ -441,6 +465,6 @@ export async function pushWorkspace(
 
 export async function destroyWorkspace(env: ForgeEnv, workspaceId: string) {
   await closeAgentSession(env, workspaceId).catch(() => undefined);
-  await sandboxFor(env, workspaceId).destroy();
+  await workspaceSandbox(env, workspaceId).destroy();
   return { destroyed: true, workspaceId };
 }
