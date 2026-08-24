@@ -34,8 +34,19 @@ export type ArtifactsTreeEntry = {
   type: 'tree' | 'blob' | 'symlink' | 'gitlink' | 'exec';
 };
 
+// @cloudflare/computer 0.2.1 publishes a stricter two-argument type for
+// createArtifact than the current upstream implementation, which explicitly
+// permits an omitted session id for a namespace-wide administrative client.
+// Keep that compatibility mismatch isolated here instead of spreading casts to
+// every caller. This forge intentionally administers the whole Artifacts
+// namespace; tenant isolation happens at the forge authorization layer.
+type NamespaceArtifactFactory = (
+  binding: Parameters<typeof createArtifact>[0],
+) => ReturnType<typeof createArtifact>;
+const createNamespaceArtifact = createArtifact as unknown as NamespaceArtifactFactory;
+
 export function artifactClient(env: ForgeEnv) {
-  return createArtifact(env.ARTIFACTS, undefined);
+  return createNamespaceArtifact(env.ARTIFACTS);
 }
 
 export function credentialedRemote(remote: string, token: string): string {
@@ -95,6 +106,21 @@ async function artifactFetch(
   return response;
 }
 
+function assertReadableText(bytes: Uint8Array, maxBytes: number, declaredBytes = 0) {
+  if (declaredBytes > maxBytes || bytes.byteLength > maxBytes) {
+    throw new Error(`Artifacts text object exceeds maxBytes (${Math.max(declaredBytes, bytes.byteLength)} > ${maxBytes})`);
+  }
+  if (bytes.includes(0)) throw new Error('Artifacts object appears to be binary');
+}
+
+async function responseText(response: Response, maxBytes: number) {
+  const declared = Number.parseInt(response.headers.get('content-length') ?? '0', 10) || 0;
+  if (declared > maxBytes) throw new Error(`Artifacts text object exceeds maxBytes (${declared} > ${maxBytes})`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  assertReadableText(bytes, maxBytes, declared);
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
 export async function artifactJson<T>(
   env: ForgeEnv,
   repo: string,
@@ -116,6 +142,16 @@ export async function artifactFile(
   path: string,
 ): Promise<Response> {
   return artifactFetch(env, repo, ['file'], { ref, path }, 'application/octet-stream');
+}
+
+export async function artifactText(
+  env: ForgeEnv,
+  repo: string,
+  ref: string,
+  path: string,
+  maxBytes = 1_000_000,
+): Promise<string> {
+  return responseText(await artifactFile(env, repo, ref, path), maxBytes);
 }
 
 export async function artifactRaw(
@@ -140,13 +176,8 @@ export async function artifactBlobText(
   repo: string,
   hash: string,
   maxBytes = 1_000_000,
-): Promise<string | null> {
-  const response = await artifactBlob(env, repo, hash);
-  const declared = Number(response.headers.get('content-length') ?? '0');
-  if (declared > maxBytes) return null;
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > maxBytes || bytes.includes(0)) return null;
-  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+): Promise<string> {
+  return responseText(await artifactBlob(env, repo, hash), maxBytes);
 }
 
 export async function artifactLog<T = ArtifactsCommit[]>(
@@ -238,3 +269,7 @@ export async function artifactGitRefs(env: ForgeEnv, repoName: string): Promise<
     await artifacts.revokeToken(repoName, token.id).catch(() => undefined);
   }
 }
+
+// Stable forge-facing name retained for callers. The implementation is the
+// native Artifacts Git ref advertisement above, not an index stored by Forge.
+export const artifactRefs = artifactGitRefs;
