@@ -3,11 +3,19 @@ import type { ForgeEnv } from './env';
 import type { RepoRecord } from './db';
 import { artifactClient } from './artifacts';
 import { buildRepoContext, repoContextMarkdown, type ContextTarget } from './context';
-import { closeAgentSession, openAgentSession, touchAgentSession } from './product';
+import { closeAgentSession, getRepoSettings, openAgentSession, touchAgentSession } from './product';
 
 const MOUNT_SCRIPT = '/usr/local/bin/mount-artifact-fs-repo';
 const MOUNT_ROOT = '/workspace/mnt';
 type SandboxId = `${string}-${string}-${string}-${string}-${string}`;
+
+type AgentSessionContext = {
+  agent_name: string;
+  ref: string;
+  target_kind: 'issue' | 'pull' | null;
+  target_number: number | null;
+  access_mode: 'read-only' | 'write-capable';
+};
 
 export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -70,6 +78,18 @@ async function currentBranch(env: ForgeEnv, workspaceId: string, repo: RepoRecor
   return result.success && result.stdout.trim() ? result.stdout.trim() : repo.default_branch;
 }
 
+async function agentSession(env: ForgeEnv, workspaceId: string, repo: RepoRecord): Promise<AgentSessionContext | null> {
+  return env.DB.prepare(
+    `SELECT agent_name, ref, target_kind, target_number, access_mode FROM agent_sessions WHERE id = ? AND repo_id = ?`,
+  ).bind(workspaceId, repo.id).first<AgentSessionContext>();
+}
+
+function targetFromSession(session: AgentSessionContext | null): ContextTarget | undefined {
+  return session?.target_kind && session.target_number
+    ? { kind: session.target_kind, number: session.target_number }
+    : undefined;
+}
+
 export async function syncWorkspaceContext(
   env: ForgeEnv,
   workspaceId: string,
@@ -104,9 +124,11 @@ export async function createWorkspace(
   workspaceId = crypto.randomUUID(),
   options: { agentName?: string; target?: ContextTarget; accessMode?: 'read-only' | 'write-capable' } = {},
 ) {
-  const accessMode = options.accessMode ?? 'write-capable';
+  const settings = await getRepoSettings(env, repo);
+  const requestedMode = options.accessMode ?? 'write-capable';
+  const accessMode: 'read-only' | 'write-capable' =
+    requestedMode === 'write-capable' && settings.agent_write_enabled ? 'write-capable' : 'read-only';
   const { cwd } = await mountWorkspace(env, repo, branch, workspaceId, accessMode === 'read-only' ? 'read' : 'write');
-  const context = await syncWorkspaceContext(env, workspaceId, repo, branch, { ...options, accessMode });
   await openAgentSession(env, repo, {
     id: workspaceId,
     agentName: options.agentName,
@@ -116,12 +138,15 @@ export async function createWorkspace(
     workspaceId,
     accessMode,
   });
+  const context = await syncWorkspaceContext(env, workspaceId, repo, branch, { ...options, accessMode });
   return {
     workspaceId,
     repo: `${repo.owner}/${repo.name}`,
     branch,
     mountPath: cwd,
     contextPath: `${cwd}/.git/forge/context.json`,
+    contextMarkdownPath: `${cwd}/.git/forge/AGENT_CONTEXT.md`,
+    accessMode,
     context,
   };
 }
@@ -135,8 +160,13 @@ export async function execWorkspace(
 ) {
   const sandbox = sandboxFor(env, workspaceId);
   const cwd = `${MOUNT_ROOT}/${repo.artifact_name}`;
+  const session = await agentSession(env, workspaceId, repo);
   const branch = await currentBranch(env, workspaceId, repo);
-  await syncWorkspaceContext(env, workspaceId, repo, branch).catch(() => undefined);
+  const context = await syncWorkspaceContext(env, workspaceId, repo, branch, {
+    agentName: session?.agent_name,
+    target: targetFromSession(session),
+    accessMode: session?.access_mode,
+  });
   await touchAgentSession(env, workspaceId).catch(() => undefined);
   const result = await sandbox.exec(command, {
     cwd,
@@ -145,6 +175,10 @@ export async function execWorkspace(
       FORGE_CONTEXT_MD: `${cwd}/.git/forge/AGENT_CONTEXT.md`,
       FORGE_REPOSITORY: `${repo.owner}/${repo.name}`,
       FORGE_REF: branch,
+      FORGE_HEAD_SHA: context.authority.headSha ?? '',
+      FORGE_TARGET_KIND: context.authority.target?.kind ?? '',
+      FORGE_TARGET_NUMBER: context.authority.target ? String(context.authority.target.number) : '',
+      FORGE_WORKING_TREE: session?.access_mode ?? 'write-capable',
     },
     timeout: Math.min(Math.max(timeoutMs, 1_000), 600_000),
   });
@@ -153,9 +187,13 @@ export async function execWorkspace(
     exitCode: result.exitCode,
     stdout: result.stdout,
     stderr: result.stderr,
+    context,
   };
 }
 
+// Retained as an internal escape hatch for commands that genuinely require a
+// POSIX checkout. Repository browsing/search/history/diff capabilities do not
+// call this; those operate directly on Artifacts Git objects in git-data.ts.
 export async function repoGitCommand(
   env: ForgeEnv,
   repo: RepoRecord,
@@ -165,11 +203,6 @@ export async function repoGitCommand(
   const id = crypto.randomUUID();
   const { sandbox, cwd } = await mountWorkspace(env, repo, repo.default_branch, id, 'read');
   try {
-    const fetchRefs = await sandbox.exec(
-      "git fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'",
-      { cwd, timeout: 120_000 },
-    );
-    if (!fetchRefs.success) throw new Error(fetchRefs.stderr || `git fetch failed with ${fetchRefs.exitCode}`);
     const result = await sandbox.exec(command, {
       cwd,
       env: { FORGE_REPOSITORY: `${repo.owner}/${repo.name}` },
@@ -192,6 +225,8 @@ export async function commitWorkspace(
   repo: RepoRecord,
   input: { message: string; authorName?: string; authorEmail?: string },
 ) {
+  const session = await agentSession(env, workspaceId, repo);
+  if (session?.access_mode === 'read-only') throw new Error('workspace is read-only; commit is not permitted');
   const name = input.authorName ?? 'Forge Agent';
   const email = input.authorEmail ?? 'forge-agent@localhost';
   const command = [
@@ -210,6 +245,11 @@ export async function pushWorkspace(
   repo: RepoRecord,
   ref: string,
 ) {
+  const session = await agentSession(env, workspaceId, repo);
+  if (session?.access_mode === 'read-only') throw new Error('workspace is read-only; push is not permitted');
+  const settings = await getRepoSettings(env, repo);
+  if (!settings.agent_write_enabled) throw new Error('repository agent writes are disabled');
+
   const sandbox = sandboxFor(env, workspaceId);
   const auth = await freshAuth(env, repo, 'write');
   const cwd = `${MOUNT_ROOT}/${repo.artifact_name}`;
