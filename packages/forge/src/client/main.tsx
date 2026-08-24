@@ -13,6 +13,7 @@ import "./styles.css";
 import "./walgit.css";
 import "./clone.css";
 import "./typography.css";
+import "./home.css";
 
 const BlobPage = lazy(() => track(import("./pages/BlobPage")).then((module) => ({ default: module.BlobPage })));
 const CommitPage = lazy(() => track(import("./pages/CommitPage")).then((module) => ({ default: module.CommitPage })));

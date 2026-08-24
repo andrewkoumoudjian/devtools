@@ -17,21 +17,21 @@ body {
   font-family: var(--font-body);
 }
 
+/* Instrument Serif is a display face: reserve it for real content titles. */
 h1,
 h2,
 h3,
 .page-title,
 .repo-title,
-.hero-body h1,
 .commit-title h2,
 .forge-page-head h1,
 .forge-repo-title,
 .forge-pr-head h1,
-.forge-release h2,
-.brand {
+.forge-release h2 {
   font-family: var(--font-title);
   font-weight: 400;
   font-synthesis: none;
+  letter-spacing: -0.015em;
 }
 
 h1 em,
@@ -39,19 +39,18 @@ h2 em,
 h3 em,
 .page-title em,
 .repo-title em,
-.hero-body h1 em,
 .commit-title h2 em,
 .forge-page-head h1 em,
 .forge-repo-title em,
 .forge-pr-head h1 em,
-.forge-release h2 em,
-.brand em {
+.forge-release h2 em {
   font-family: var(--font-title);
   font-style: italic;
   font-weight: 400;
 }
 
-/* Preserve the sans UI hierarchy for controls, labels, tabs and dense metadata. */
+/* Product chrome and dense Git UI stay SF Pro. */
+.brand,
 .tab,
 .btn,
 .topnav-link,
@@ -62,6 +61,7 @@ h3 em,
 .forge-repo-name,
 .forge-field label,
 .forge-label,
-.forge-log-label {
+.forge-log-label,
+.repo-index-name {
   font-family: var(--font-body);
 }
