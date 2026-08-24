@@ -34,19 +34,80 @@ export type ArtifactsTreeEntry = {
   type: 'tree' | 'blob' | 'symlink' | 'gitlink' | 'exec';
 };
 
-// @cloudflare/computer 0.2.1 publishes a stricter two-argument type for
-// createArtifact than the current upstream implementation, which explicitly
-// permits an omitted session id for a namespace-wide administrative client.
-// Keep that compatibility mismatch isolated here instead of spreading casts to
-// every caller. This forge intentionally administers the whole Artifacts
-// namespace; tenant isolation happens at the forge authorization layer.
+// @cloudflare/computer >= 0.2 publishes a session-scoped artifacts client:
+// createArtifact(binding, sessionId) scopes every stored repo name as
+// `${sessionId}__${name}` and REQUIRES a non-empty sessionId (it asserts on
+// `.length`), and neither part may contain '__'. The forge's canonical stored
+// names are exactly `${owner}__${repo}` (see naming.ts), so we keep the old
+// namespace-wide facade: callers pass the full stored name, this adapter
+// splits it into (owner, repo) and drives the scoped client underneath.
+// Tenant isolation still happens at the forge authorization layer.
 type NamespaceArtifactFactory = (
   binding: Parameters<typeof createArtifact>[0],
+  sessionId: string,
 ) => ReturnType<typeof createArtifact>;
-const createNamespaceArtifact = createArtifact as unknown as NamespaceArtifactFactory;
+const createScopedArtifact = createArtifact as unknown as NamespaceArtifactFactory;
 
-export function artifactClient(env: ForgeEnv) {
-  return createNamespaceArtifact(env.ARTIFACTS);
+type ScopedArtifactsClient = ReturnType<typeof createArtifact>;
+
+type NamespaceArtifactsClient = {
+  create(name: string, opts?: Parameters<ScopedArtifactsClient['create']>[1]): ReturnType<ScopedArtifactsClient['create']>;
+  get(name: string): ReturnType<ScopedArtifactsClient['get']>;
+  delete(name: string): ReturnType<ScopedArtifactsClient['delete']>;
+  import(
+    name: string,
+    source: Parameters<ScopedArtifactsClient['import']>[1],
+    opts?: Parameters<ScopedArtifactsClient['import']>[2],
+  ): ReturnType<ScopedArtifactsClient['import']>;
+  createToken(
+    name: string,
+    scope: Parameters<ScopedArtifactsClient['createToken']>[1],
+    ttl?: Parameters<ScopedArtifactsClient['createToken']>[2],
+  ): ReturnType<ScopedArtifactsClient['createToken']>;
+  revokeToken(name: string, tokenOrId: Parameters<ScopedArtifactsClient['revokeToken']>[1]): ReturnType<ScopedArtifactsClient['revokeToken']>;
+};
+
+function splitStoredName(stored: string): { session: string; local: string } {
+  const i = stored.indexOf('__');
+  if (i <= 0 || stored.indexOf('__', i + 2) !== -1) {
+    throw new Error(`invalid stored artifact name '${stored}' (expected 'owner__repo')`);
+  }
+  return { session: stored.slice(0, i), local: stored.slice(i + 2) };
+}
+
+export function artifactClient(env: ForgeEnv): NamespaceArtifactsClient {
+  const cache = new Map<string, ScopedArtifactsClient>();
+  const scopedFor = (stored: string): ScopedArtifactsClient => {
+    const { session } = splitStoredName(stored);
+    let client = cache.get(session);
+    if (!client) {
+      client = createScopedArtifact(env.ARTIFACTS, session);
+      cache.set(session, client);
+    }
+    return client;
+  };
+  return {
+    create(name, opts) {
+      const { session, local } = splitStoredName(name);
+      return createScopedArtifact(env.ARTIFACTS, session).create(local, opts);
+    },
+    get(name) {
+      return scopedFor(name).get(splitStoredName(name).local);
+    },
+    delete(name) {
+      return scopedFor(name).delete(splitStoredName(name).local);
+    },
+    import(name, source, opts) {
+      const { session, local } = splitStoredName(name);
+      return scopedFor(name).import(local, source, opts);
+    },
+    createToken(name, scope, ttl) {
+      return scopedFor(name).createToken(splitStoredName(name).local, scope, ttl);
+    },
+    revokeToken(name, tokenOrId) {
+      return scopedFor(name).revokeToken(splitStoredName(name).local, tokenOrId);
+    },
+  };
 }
 
 export function credentialedRemote(remote: string, token: string): string {
