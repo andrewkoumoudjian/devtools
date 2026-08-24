@@ -17,6 +17,14 @@ type AgentSessionContext = {
   access_mode: 'read-only' | 'write-capable';
 };
 
+export type WorkspaceSession = AgentSessionContext & {
+  id: string;
+  repo_id: string;
+  workspace_id: string | null;
+  opened_at: string;
+  last_seen_at: string;
+};
+
 export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -40,6 +48,25 @@ function sandboxFor(env: ForgeEnv, id: string) {
     sleepAfter: '30m',
     transport: 'rpc',
   });
+}
+
+function workspaceRoot(repo: RepoRecord) {
+  return `${MOUNT_ROOT}/${repo.artifact_name}`;
+}
+
+function workspacePath(repo: RepoRecord, path = '') {
+  if (path.includes('\0')) throw new Error('workspace path contains a NUL byte');
+  if (path.startsWith('/')) throw new Error('workspace paths must be repository-relative');
+  const parts = path.split('/').filter((part) => part !== '' && part !== '.');
+  if (parts.some((part) => part === '..')) throw new Error('workspace path cannot escape the repository root');
+  return parts.length ? `${workspaceRoot(repo)}/${parts.join('/')}` : workspaceRoot(repo);
+}
+
+function assertWorkingTreePath(path: string) {
+  const normalized = path.replace(/^\.\//, '');
+  if (normalized === '.git' || normalized.startsWith('.git/')) {
+    throw new Error('direct writes to .git are not permitted through the workspace file API');
+  }
 }
 
 async function freshAuth(env: ForgeEnv, repo: RepoRecord, scope: 'read' | 'write' = 'write') {
@@ -67,12 +94,12 @@ async function mountWorkspace(env: ForgeEnv, repo: RepoRecord, branch: string, w
     await sandbox.destroy().catch(() => undefined);
     throw new Error(`workspace mount failed (${result.exitCode}): ${result.stderr.slice(0, 500)}`);
   }
-  return { sandbox, auth, cwd: `${MOUNT_ROOT}/${repo.artifact_name}` };
+  return { sandbox, auth, cwd: workspaceRoot(repo) };
 }
 
 async function currentBranch(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
   const result = await sandboxFor(env, workspaceId).exec('git branch --show-current', {
-    cwd: `${MOUNT_ROOT}/${repo.artifact_name}`,
+    cwd: workspaceRoot(repo),
     timeout: 10_000,
   });
   return result.success && result.stdout.trim() ? result.stdout.trim() : repo.default_branch;
@@ -82,6 +109,21 @@ async function agentSession(env: ForgeEnv, workspaceId: string, repo: RepoRecord
   return env.DB.prepare(
     `SELECT agent_name, ref, target_kind, target_number, access_mode FROM agent_sessions WHERE id = ? AND repo_id = ?`,
   ).bind(workspaceId, repo.id).first<AgentSessionContext>();
+}
+
+export async function getWorkspaceSession(env: ForgeEnv, workspaceId: string, repo: RepoRecord): Promise<WorkspaceSession> {
+  const row = await env.DB.prepare(`SELECT * FROM agent_sessions WHERE id = ? AND repo_id = ?`)
+    .bind(workspaceId, repo.id)
+    .first<WorkspaceSession>();
+  if (!row) throw new Error(`workspace ${workspaceId} is not attached to ${repo.owner}/${repo.name}`);
+  return row;
+}
+
+export async function listWorkspaceSessions(env: ForgeEnv, repo: RepoRecord): Promise<WorkspaceSession[]> {
+  const rows = await env.DB.prepare(
+    `SELECT * FROM agent_sessions WHERE repo_id = ? ORDER BY last_seen_at DESC, opened_at DESC`,
+  ).bind(repo.id).all<WorkspaceSession>();
+  return rows.results;
 }
 
 function targetFromSession(session: AgentSessionContext | null): ContextTarget | undefined {
@@ -98,7 +140,7 @@ export async function syncWorkspaceContext(
   options: { agentName?: string; target?: ContextTarget; accessMode?: 'read-only' | 'write-capable' } = {},
 ) {
   const sandbox = sandboxFor(env, workspaceId);
-  const cwd = `${MOUNT_ROOT}/${repo.artifact_name}`;
+  const cwd = workspaceRoot(repo);
   const context = await buildRepoContext(env, repo, {
     ref,
     target: options.target,
@@ -117,11 +159,35 @@ export async function syncWorkspaceContext(
   return context;
 }
 
+async function prepareWorkspaceOperation(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
+  const session = await getWorkspaceSession(env, workspaceId, repo);
+  const ref = await currentBranch(env, workspaceId, repo);
+  if (ref !== session.ref) {
+    await env.DB.prepare(`UPDATE agent_sessions SET ref = ?, last_seen_at = datetime('now') WHERE id = ?`)
+      .bind(ref, workspaceId)
+      .run();
+  } else {
+    await touchAgentSession(env, workspaceId).catch(() => undefined);
+  }
+  const context = await syncWorkspaceContext(env, workspaceId, repo, ref, {
+    agentName: session.agent_name,
+    target: targetFromSession(session),
+    accessMode: session.access_mode,
+  });
+  return { session: { ...session, ref }, context, sandbox: sandboxFor(env, workspaceId), cwd: workspaceRoot(repo) };
+}
+
+async function assertWorkspaceWritable(env: ForgeEnv, repo: RepoRecord, session: WorkspaceSession | AgentSessionContext) {
+  if (session.access_mode === 'read-only') throw new Error('workspace is read-only');
+  const settings = await getRepoSettings(env, repo);
+  if (!settings.agent_write_enabled) throw new Error('repository agent writes are disabled');
+}
+
 export async function createWorkspace(
   env: ForgeEnv,
   repo: RepoRecord,
   branch: string,
-  workspaceId = crypto.randomUUID(),
+  workspaceId: SandboxId = crypto.randomUUID(),
   options: { agentName?: string; target?: ContextTarget; accessMode?: 'read-only' | 'write-capable' } = {},
 ) {
   const settings = await getRepoSettings(env, repo);
@@ -158,27 +224,18 @@ export async function execWorkspace(
   command: string,
   timeoutMs = 120_000,
 ) {
-  const sandbox = sandboxFor(env, workspaceId);
-  const cwd = `${MOUNT_ROOT}/${repo.artifact_name}`;
-  const session = await agentSession(env, workspaceId, repo);
-  const branch = await currentBranch(env, workspaceId, repo);
-  const context = await syncWorkspaceContext(env, workspaceId, repo, branch, {
-    agentName: session?.agent_name,
-    target: targetFromSession(session),
-    accessMode: session?.access_mode,
-  });
-  await touchAgentSession(env, workspaceId).catch(() => undefined);
+  const { session, context, sandbox, cwd } = await prepareWorkspaceOperation(env, workspaceId, repo);
   const result = await sandbox.exec(command, {
     cwd,
     env: {
       FORGE_CONTEXT_PATH: `${cwd}/.git/forge/context.json`,
       FORGE_CONTEXT_MD: `${cwd}/.git/forge/AGENT_CONTEXT.md`,
       FORGE_REPOSITORY: `${repo.owner}/${repo.name}`,
-      FORGE_REF: branch,
+      FORGE_REF: session.ref,
       FORGE_HEAD_SHA: context.authority.headSha ?? '',
       FORGE_TARGET_KIND: context.authority.target?.kind ?? '',
       FORGE_TARGET_NUMBER: context.authority.target ? String(context.authority.target.number) : '',
-      FORGE_WORKING_TREE: session?.access_mode ?? 'write-capable',
+      FORGE_WORKING_TREE: session.access_mode,
     },
     timeout: Math.min(Math.max(timeoutMs, 1_000), 600_000),
   });
@@ -187,6 +244,118 @@ export async function execWorkspace(
     exitCode: result.exitCode,
     stdout: result.stdout,
     stderr: result.stderr,
+    context,
+  };
+}
+
+export async function readWorkspaceFile(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  path: string,
+  encoding: 'utf8' | 'base64' = 'utf8',
+) {
+  const { sandbox, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  const absolutePath = workspacePath(repo, path);
+  const file = encoding === 'base64'
+    ? await sandbox.readFile(absolutePath, { encoding: 'base64' })
+    : await sandbox.readFile(absolutePath);
+  return { path, ...file, context };
+}
+
+export async function writeWorkspaceFile(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  path: string,
+  content: string,
+  options: { encoding?: 'utf8' | 'base64'; createParents?: boolean } = {},
+) {
+  assertWorkingTreePath(path);
+  const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  await assertWorkspaceWritable(env, repo, session);
+  const absolutePath = workspacePath(repo, path);
+  if (options.createParents !== false) {
+    const parent = absolutePath.slice(0, absolutePath.lastIndexOf('/'));
+    if (parent && parent !== workspaceRoot(repo)) await sandbox.mkdir(parent, { recursive: true });
+  }
+  const result = options.encoding === 'base64'
+    ? await sandbox.writeFile(absolutePath, content, { encoding: 'base64' })
+    : await sandbox.writeFile(absolutePath, content);
+  return { path, ...result, context };
+}
+
+export async function listWorkspaceFiles(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  path = '',
+  options: { recursive?: boolean; includeHidden?: boolean } = {},
+) {
+  const { sandbox, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  const result = await sandbox.listFiles(workspacePath(repo, path), options);
+  return { path, ...result, context };
+}
+
+export async function workspaceExists(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  path: string,
+) {
+  const { sandbox, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  return { path, ...(await sandbox.exists(workspacePath(repo, path))), context };
+}
+
+export async function mkdirWorkspace(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  path: string,
+  recursive = true,
+) {
+  assertWorkingTreePath(path);
+  const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  await assertWorkspaceWritable(env, repo, session);
+  return { path, ...(await sandbox.mkdir(workspacePath(repo, path), { recursive })), context };
+}
+
+export async function moveWorkspaceFile(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  from: string,
+  to: string,
+) {
+  assertWorkingTreePath(from);
+  assertWorkingTreePath(to);
+  const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  await assertWorkspaceWritable(env, repo, session);
+  return { from, to, ...(await sandbox.moveFile(workspacePath(repo, from), workspacePath(repo, to))), context };
+}
+
+export async function deleteWorkspaceFile(
+  env: ForgeEnv,
+  workspaceId: string,
+  repo: RepoRecord,
+  path: string,
+) {
+  assertWorkingTreePath(path);
+  const { sandbox, session, context } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  await assertWorkspaceWritable(env, repo, session);
+  return { path, ...(await sandbox.deleteFile(workspacePath(repo, path))), context };
+}
+
+export async function workspaceContext(env: ForgeEnv, workspaceId: string, repo: RepoRecord) {
+  const { session, context, cwd } = await prepareWorkspaceOperation(env, workspaceId, repo);
+  return {
+    workspaceId,
+    repo: `${repo.owner}/${repo.name}`,
+    ref: session.ref,
+    accessMode: session.access_mode,
+    mountPath: cwd,
+    contextPath: `${cwd}/.git/forge/context.json`,
+    contextMarkdownPath: `${cwd}/.git/forge/AGENT_CONTEXT.md`,
     context,
   };
 }
@@ -252,7 +421,7 @@ export async function pushWorkspace(
 
   const sandbox = sandboxFor(env, workspaceId);
   const auth = await freshAuth(env, repo, 'write');
-  const cwd = `${MOUNT_ROOT}/${repo.artifact_name}`;
+  const cwd = workspaceRoot(repo);
   const configure = await sandbox.exec(
     `git config http.extraHeader ${shellQuote(`Authorization: ${auth.authorization}`)}`,
     { cwd, timeout: 10_000 },
