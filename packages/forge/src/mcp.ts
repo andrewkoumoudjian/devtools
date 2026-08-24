@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ForgeEnv } from './env';
-import { capabilityRegistry } from './capabilities';
+import { forgeRegistry } from './registry';
 
 function text(value: unknown) {
   return {
@@ -10,15 +10,15 @@ function text(value: unknown) {
 }
 
 export function createForgeMcpServer(env: ForgeEnv) {
-  const server = new McpServer({ name: 'devtools-forge', version: '0.1.0' });
+  const server = new McpServer({ name: 'devtools-forge', version: '0.2.0' });
 
   server.registerTool(
     'forge_search',
     {
-      description: 'Search the forge capability graph. Use this before executing an unfamiliar operation.',
+      description: 'Search the forge capability graph. Repo-scoped executions automatically return the same deterministic RepoContext used by every other agent.',
       inputSchema: { query: z.string().default('') },
     },
-    async ({ query }) => text(capabilityRegistry.search(query)),
+    async ({ query }) => text(forgeRegistry.search(query)),
   );
 
   server.registerTool(
@@ -27,19 +27,19 @@ export function createForgeMcpServer(env: ForgeEnv) {
       description: 'Get the exact input schema and mutation status for one forge capability.',
       inputSchema: { name: z.string() },
     },
-    async ({ name }) => text(capabilityRegistry.describe(name)),
+    async ({ name }) => text(forgeRegistry.describe(name)),
   );
 
   server.registerTool(
     'forge_execute',
     {
-      description: 'Execute one named forge capability using the same implementation as the web/API surfaces.',
+      description: 'Execute one named forge capability. When owner/repo is present, the response also carries the current non-LLM RepoContext: authority, ref/head, repo instructions, CODEOWNERS, active work, target thread, CI and retrieval primitives.',
       inputSchema: {
         name: z.string(),
         input: z.record(z.string(), z.unknown()).default({}),
       },
     },
-    async ({ name, input }) => text(await capabilityRegistry.execute({ env }, name, input)),
+    async ({ name, input }) => text(await forgeRegistry.executeForAgent({ env }, name, input)),
   );
 
   return server;
