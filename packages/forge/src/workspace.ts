@@ -187,7 +187,7 @@ export async function createWorkspace(
   env: ForgeEnv,
   repo: RepoRecord,
   branch: string,
-  workspaceId: SandboxId = crypto.randomUUID(),
+  workspaceId: string = crypto.randomUUID(),
   options: { agentName?: string; target?: ContextTarget; accessMode?: 'read-only' | 'write-capable' } = {},
 ) {
   const settings = await getRepoSettings(env, repo);
