@@ -1,5 +1,20 @@
 import { createArtifact } from '@cloudflare/computer/artifacts';
 import type { ForgeEnv } from './env';
+import { fetchWithRetry } from './http';
+
+export type GitRef = {
+  name: string;
+  hash: string;
+  type: 'branch' | 'tag' | 'other';
+};
+
+export type GitRefs = {
+  head: string | null;
+  headHash: string | null;
+  branches: GitRef[];
+  tags: GitRef[];
+  other: GitRef[];
+};
 
 export function artifactClient(env: ForgeEnv) {
   return createArtifact(env.ARTIFACTS, null);
@@ -10,6 +25,11 @@ export function credentialedRemote(remote: string, token: string): string {
   const sep = remote.indexOf('://');
   if (sep === -1) return remote;
   return `${remote.slice(0, sep + 3)}x:${secret}@${remote.slice(sep + 3)}`;
+}
+
+function basicAuth(token: string): string {
+  const secret = token.split('?expires=', 1)[0] ?? token;
+  return `Basic ${btoa(`x:${secret}`)}`;
 }
 
 function artifactsRestUrl(
@@ -44,12 +64,12 @@ async function artifactFetch(
   query: Record<string, string | number | undefined> | undefined,
   accept: string,
 ): Promise<Response> {
-  const response = await fetch(artifactsRestUrl(env, repo, segments, query), {
+  const response = await fetchWithRetry(artifactsRestUrl(env, repo, segments, query), {
     headers: {
       accept,
       authorization: `Bearer ${env.ARTIFACTS_API_TOKEN}`,
     },
-  });
+  }, { timeoutMs: 10_000, retries: 2 });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`Artifacts ${response.status}: ${text.slice(0, 500)}`);
@@ -80,6 +100,21 @@ export async function artifactFile(
   return artifactFetch(env, repo, ['file'], { ref, path }, 'application/octet-stream');
 }
 
+export async function artifactText(
+  env: ForgeEnv,
+  repo: string,
+  ref: string,
+  path: string,
+  maxBytes = 1_000_000,
+): Promise<string> {
+  const response = await artifactFile(env, repo, ref, path);
+  const declared = Number(response.headers.get('content-length') ?? 0);
+  if (declared > maxBytes) throw new Error(`${path} exceeds ${maxBytes} bytes`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maxBytes) throw new Error(`${path} exceeds ${maxBytes} bytes`);
+  return new TextDecoder().decode(bytes);
+}
+
 export async function artifactRaw(
   env: ForgeEnv,
   repo: string,
@@ -105,4 +140,75 @@ export async function artifactTree<T>(env: ForgeEnv, repo: string, hash: string)
 
 export async function artifactCommit<T>(env: ForgeEnv, repo: string, hash: string): Promise<T> {
   return artifactJson<T>(env, repo, ['commit', hash]);
+}
+
+function parsePktLines(bytes: Uint8Array): string[] {
+  const decoder = new TextDecoder();
+  const lines: string[] = [];
+  let offset = 0;
+  while (offset + 4 <= bytes.length) {
+    const prefix = decoder.decode(bytes.slice(offset, offset + 4));
+    const length = Number.parseInt(prefix, 16);
+    if (!Number.isFinite(length)) break;
+    offset += 4;
+    if (length === 0) continue;
+    if (length < 4 || offset + length - 4 > bytes.length) break;
+    const payload = decoder.decode(bytes.slice(offset, offset + length - 4));
+    offset += length - 4;
+    lines.push(payload.replace(/\n$/, ''));
+  }
+  return lines;
+}
+
+export async function artifactRefs(env: ForgeEnv, repoName: string): Promise<GitRefs> {
+  const client = artifactClient(env);
+  const [repo, token] = await Promise.all([
+    client.get(repoName),
+    client.createToken(repoName, 'read', 300),
+  ]);
+  const url = new URL(repo.remote.replace(/\/+$/, '') + '/info/refs');
+  url.searchParams.set('service', 'git-upload-pack');
+  const response = await fetchWithRetry(url, {
+    headers: {
+      accept: 'application/x-git-upload-pack-advertisement',
+      authorization: basicAuth(token.plaintext),
+    },
+  }, { timeoutMs: 10_000, retries: 2 });
+  if (!response.ok) throw new Error(`Git ref advertisement failed (${response.status})`);
+
+  const packets = parsePktLines(new Uint8Array(await response.arrayBuffer()));
+  const refs: GitRef[] = [];
+  let head: string | null = null;
+  let headHash: string | null = null;
+
+  for (const packet of packets) {
+    if (!packet || packet.startsWith('# service=')) continue;
+    const [record, capabilities = ''] = packet.split('\0', 2);
+    const separator = record.indexOf(' ');
+    if (separator <= 0) continue;
+    const hash = record.slice(0, separator);
+    const name = record.slice(separator + 1);
+    if (!/^[0-9a-f]{40,64}$/i.test(hash)) continue;
+    if (name === 'HEAD') {
+      headHash = hash;
+      const match = capabilities.match(/(?:^| )symref=HEAD:([^ ]+)/);
+      head = match?.[1]?.replace(/^refs\/heads\//, '') ?? null;
+      continue;
+    }
+    if (name.endsWith('^{}')) continue;
+    refs.push({
+      name: name.replace(/^refs\/(heads|tags)\//, ''),
+      hash,
+      type: name.startsWith('refs/heads/') ? 'branch' : name.startsWith('refs/tags/') ? 'tag' : 'other',
+    });
+  }
+
+  const byName = (a: GitRef, b: GitRef) => a.name.localeCompare(b.name);
+  return {
+    head,
+    headHash,
+    branches: refs.filter((ref) => ref.type === 'branch').sort(byName),
+    tags: refs.filter((ref) => ref.type === 'tag').sort(byName),
+    other: refs.filter((ref) => ref.type === 'other').sort(byName),
+  };
 }
