@@ -1,0 +1,67 @@
+:root {
+  --font-body: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+  --font-title: "Instrument Serif", Georgia, "Times New Roman", serif;
+}
+
+html,
+body,
+#root,
+button,
+input,
+textarea,
+select {
+  font-family: var(--font-body);
+}
+
+body {
+  font-family: var(--font-body);
+}
+
+h1,
+h2,
+h3,
+.page-title,
+.repo-title,
+.hero-body h1,
+.commit-title h2,
+.forge-page-head h1,
+.forge-repo-title,
+.forge-pr-head h1,
+.forge-release h2,
+.brand {
+  font-family: var(--font-title);
+  font-weight: 400;
+  font-synthesis: none;
+}
+
+h1 em,
+h2 em,
+h3 em,
+.page-title em,
+.repo-title em,
+.hero-body h1 em,
+.commit-title h2 em,
+.forge-page-head h1 em,
+.forge-repo-title em,
+.forge-pr-head h1 em,
+.forge-release h2 em,
+.brand em {
+  font-family: var(--font-title);
+  font-style: italic;
+  font-weight: 400;
+}
+
+/* Preserve the sans UI hierarchy for controls, labels, tabs and dense metadata. */
+.tab,
+.btn,
+.topnav-link,
+.pill,
+.box-header,
+.commit-subject,
+.forge-list-title,
+.forge-repo-name,
+.forge-field label,
+.forge-label,
+.forge-log-label {
+  font-family: var(--font-body);
+}
