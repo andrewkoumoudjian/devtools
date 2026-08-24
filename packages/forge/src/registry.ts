@@ -2,12 +2,13 @@ import type { ForgeEnv } from './env';
 import { capabilityRegistry as coreRegistry } from './capabilities';
 import { featureCapabilities } from './feature-capabilities';
 import { artifactNativeCapabilities } from './artifact-native-capabilities';
+import { policyCapabilities } from './policy-capabilities';
 import { buildRepoContext, type ContextTarget } from './context';
 import { getRepoRecord } from './db';
 
 export type ForgeCapabilityContext = { env: ForgeEnv };
 
-const featureList = [...featureCapabilities, ...artifactNativeCapabilities];
+const featureList = [...featureCapabilities, ...artifactNativeCapabilities, ...policyCapabilities];
 const features = new Map(featureList.map((capability) => [capability.name, capability]));
 const aliases: Record<string, string> = {
   'issue.create': 'issue.create.enriched',
