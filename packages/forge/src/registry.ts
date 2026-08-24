@@ -1,12 +1,14 @@
 import type { ForgeEnv } from './env';
 import { capabilityRegistry as coreRegistry } from './capabilities';
 import { featureCapabilities } from './feature-capabilities';
+import { artifactNativeCapabilities } from './artifact-native-capabilities';
 import { buildRepoContext, type ContextTarget } from './context';
 import { getRepoRecord } from './db';
 
 export type ForgeCapabilityContext = { env: ForgeEnv };
 
-const features = new Map(featureCapabilities.map((capability) => [capability.name, capability]));
+const featureList = [...featureCapabilities, ...artifactNativeCapabilities];
+const features = new Map(featureList.map((capability) => [capability.name, capability]));
 const aliases: Record<string, string> = {
   'issue.create': 'issue.create.enriched',
   'pull.create': 'pull.create.enriched',
@@ -36,19 +38,19 @@ function repoCoordinates(name: string, rawInput: unknown): { owner: string; repo
   };
 }
 
-function featureSummary(capability: (typeof featureCapabilities)[number], displayName = capability.name) {
+function summary(capability: { name: string; description: string; mutates: boolean }, displayName = capability.name) {
   return { name: displayName, description: capability.description, mutates: capability.mutates };
 }
 
 function allSummaries() {
   const core = coreRegistry.list().map((entry) => {
-    const replacement = aliases[entry.name] ? features.get(aliases[entry.name]!) : undefined;
-    return replacement ? featureSummary(replacement, entry.name) : entry;
+    const replacement = aliases[entry.name] ? features.get(aliases[entry.name]!) : features.get(entry.name);
+    return replacement ? summary(replacement, entry.name) : entry;
   });
   const coreNames = new Set(core.map((entry) => entry.name));
-  const extra = featureCapabilities
+  const extra = Array.from(features.values())
     .filter((capability) => !hiddenFeatures.has(capability.name) && !coreNames.has(capability.name))
-    .map((capability) => featureSummary(capability));
+    .map((capability) => summary(capability));
   return [...core, ...extra];
 }
 
@@ -73,7 +75,7 @@ export const forgeRegistry = {
 
   describe(name: string) {
     const resolved = canonicalName(name);
-    const feature = features.get(resolved);
+    const feature = features.get(resolved) ?? features.get(name);
     if (feature) {
       return { name, description: feature.description, mutates: feature.mutates, inputSchema: feature.inputSchema };
     }
@@ -82,7 +84,7 @@ export const forgeRegistry = {
 
   async execute(ctx: ForgeCapabilityContext, name: string, rawInput: unknown) {
     const resolved = canonicalName(name);
-    const feature = features.get(resolved);
+    const feature = features.get(resolved) ?? features.get(name);
     if (feature) {
       const input = feature.parse(rawInput);
       return feature.execute(ctx, input as never);
