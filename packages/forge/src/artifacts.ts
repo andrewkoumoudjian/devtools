@@ -35,7 +35,7 @@ export type ArtifactsTreeEntry = {
 };
 
 export function artifactClient(env: ForgeEnv) {
-  return createArtifact(env.ARTIFACTS);
+  return createArtifact(env.ARTIFACTS, undefined);
 }
 
 export function credentialedRemote(remote: string, token: string): string {
@@ -118,6 +118,15 @@ export async function artifactFile(
   return artifactFetch(env, repo, ['file'], { ref, path }, 'application/octet-stream');
 }
 
+export async function artifactRaw(
+  env: ForgeEnv,
+  repo: string,
+  ref: string,
+  path: string,
+): Promise<Response> {
+  return artifactFetch(env, repo, ['raw', ref, ...path.split('/')], undefined, '*/*');
+}
+
 export async function artifactBlob(
   env: ForgeEnv,
   repo: string,
@@ -126,41 +135,18 @@ export async function artifactBlob(
   return artifactFetch(env, repo, ['blob', hash], undefined, 'application/octet-stream');
 }
 
-async function boundedText(response: Response, label: string, maxBytes: number): Promise<string> {
-  const declared = Number(response.headers.get('content-length') ?? 0);
-  if (declared > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
-  if (bytes.subarray(0, Math.min(bytes.length, 8192)).includes(0)) throw new Error(`${label} is binary`);
-  return new TextDecoder().decode(bytes);
-}
-
-export async function artifactText(
-  env: ForgeEnv,
-  repo: string,
-  ref: string,
-  path: string,
-  maxBytes = 1_000_000,
-): Promise<string> {
-  return boundedText(await artifactFile(env, repo, ref, path), path, maxBytes);
-}
-
 export async function artifactBlobText(
   env: ForgeEnv,
   repo: string,
   hash: string,
   maxBytes = 1_000_000,
-): Promise<string> {
-  return boundedText(await artifactBlob(env, repo, hash), hash, maxBytes);
-}
-
-export async function artifactRaw(
-  env: ForgeEnv,
-  repo: string,
-  ref: string,
-  path: string,
-): Promise<Response> {
-  return artifactFetch(env, repo, ['raw', ref, ...path.split('/')], undefined, '*/*');
+): Promise<string | null> {
+  const response = await artifactBlob(env, repo, hash);
+  const declared = Number(response.headers.get('content-length') ?? '0');
+  if (declared > maxBytes) return null;
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maxBytes || bytes.includes(0)) return null;
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 }
 
 export async function artifactLog<T = ArtifactsCommit[]>(
@@ -181,73 +167,74 @@ export async function artifactCommit<T = ArtifactsCommit>(env: ForgeEnv, repo: s
   return artifactJson<T>(env, repo, ['commit', hash]);
 }
 
-function parsePktLines(bytes: Uint8Array): string[] {
+function parsePktLines(bytes: Uint8Array) {
   const decoder = new TextDecoder();
   const lines: string[] = [];
   let offset = 0;
   while (offset + 4 <= bytes.length) {
-    const prefix = decoder.decode(bytes.slice(offset, offset + 4));
-    const length = Number.parseInt(prefix, 16);
+    const lengthText = decoder.decode(bytes.slice(offset, offset + 4));
+    const length = Number.parseInt(lengthText, 16);
     if (!Number.isFinite(length)) break;
     offset += 4;
-    if (length === 0) continue;
+    if (length === 0 || length === 1 || length === 2) continue;
     if (length < 4 || offset + length - 4 > bytes.length) break;
-    const payload = decoder.decode(bytes.slice(offset, offset + length - 4));
+    lines.push(decoder.decode(bytes.slice(offset, offset + length - 4)).replace(/\n$/, ''));
     offset += length - 4;
-    lines.push(payload.replace(/\n$/, ''));
   }
   return lines;
 }
 
-export async function artifactRefs(env: ForgeEnv, repoName: string): Promise<GitRefs> {
-  const client = artifactClient(env);
-  const [repo, token] = await Promise.all([
-    client.get(repoName),
-    client.createToken(repoName, 'read', 300),
-  ]);
-  const url = new URL(repo.remote.replace(/\/+$/, '') + '/info/refs');
-  url.searchParams.set('service', 'git-upload-pack');
-  const response = await fetchWithRetry(url, {
-    headers: {
-      accept: 'application/x-git-upload-pack-advertisement',
-      authorization: basicAuth(token.plaintext),
-    },
-  }, { timeoutMs: 10_000, retries: 2 });
-  if (!response.ok) throw new Error(`Git ref advertisement failed (${response.status})`);
-
-  const packets = parsePktLines(new Uint8Array(await response.arrayBuffer()));
-  const refs: GitRef[] = [];
+function parseRefAdvertisement(lines: string[]): GitRefs {
+  const branches: GitRef[] = [];
+  const tags: GitRef[] = [];
+  const other: GitRef[] = [];
   let head: string | null = null;
   let headHash: string | null = null;
 
-  for (const packet of packets) {
-    if (!packet || packet.startsWith('# service=')) continue;
-    const [record, capabilities = ''] = packet.split('\0', 2);
-    const separator = record.indexOf(' ');
-    if (separator <= 0) continue;
-    const hash = record.slice(0, separator);
-    const name = record.slice(separator + 1);
-    if (!/^[0-9a-f]{40,64}$/i.test(hash)) continue;
-    if (name === 'HEAD') {
-      headHash = hash;
-      const match = capabilities.match(/(?:^| )symref=HEAD:([^ ]+)/);
-      head = match?.[1]?.replace(/^refs\/heads\//, '') ?? null;
+  for (const raw of lines) {
+    const line = raw.startsWith('# service=') || raw.startsWith('version ') ? '' : raw.split('\0', 1)[0] ?? '';
+    if (!line) continue;
+    if (line.startsWith('symref=HEAD:')) {
+      head = line.slice('symref=HEAD:'.length).split(' ', 1)[0] ?? null;
       continue;
     }
-    if (name.endsWith('^{}')) continue;
-    refs.push({
-      name: name.replace(/^refs\/(heads|tags)\//, ''),
-      hash,
-      type: name.startsWith('refs/heads/') ? 'branch' : name.startsWith('refs/tags/') ? 'tag' : 'other',
-    });
+    const match = line.match(/^([0-9a-f]{40,64})\s+([^\s]+)(?:\s|$)/i);
+    if (!match) continue;
+    const hash = match[1]!;
+    const ref = match[2]!;
+    if (ref === 'HEAD') {
+      headHash = hash;
+      continue;
+    }
+    if (ref.endsWith('^{}')) continue;
+    if (ref.startsWith('refs/heads/')) branches.push({ name: ref.slice(11), hash, type: 'branch' });
+    else if (ref.startsWith('refs/tags/')) tags.push({ name: ref.slice(10), hash, type: 'tag' });
+    else other.push({ name: ref, hash, type: 'other' });
   }
 
-  const byName = (a: GitRef, b: GitRef) => a.name.localeCompare(b.name);
-  return {
-    head,
-    headHash,
-    branches: refs.filter((ref) => ref.type === 'branch').sort(byName),
-    tags: refs.filter((ref) => ref.type === 'tag').sort(byName),
-    other: refs.filter((ref) => ref.type === 'other').sort(byName),
-  };
+  for (const raw of lines) {
+    const sym = raw.match(/symref=HEAD:([^\s\0]+)/);
+    if (sym) head = sym[1]!;
+  }
+
+  return { head, headHash, branches, tags, other };
+}
+
+export async function artifactGitRefs(env: ForgeEnv, repoName: string): Promise<GitRefs> {
+  const artifacts = artifactClient(env);
+  const info = await artifacts.get(repoName);
+  const token = await artifacts.createToken(repoName, 'read', 300);
+  const response = await fetchWithRetry(`${info.remote}/info/refs?service=git-upload-pack`, {
+    headers: {
+      accept: 'application/x-git-upload-pack-advertisement',
+      authorization: basicAuth(token.plaintext),
+      'git-protocol': 'version=1',
+    },
+  }, { timeoutMs: 10_000, retries: 2 });
+  try {
+    if (!response.ok) throw new Error(`Artifacts git ref advertisement failed: ${response.status}`);
+    return parseRefAdvertisement(parsePktLines(new Uint8Array(await response.arrayBuffer())));
+  } finally {
+    await artifacts.revokeToken(repoName, token.id).catch(() => undefined);
+  }
 }
